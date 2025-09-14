@@ -5,6 +5,8 @@ from matplotlib import pyplot as plt
 import os
 import tempfile
 import time
+from llava_model import forward_pass
+import asyncio
 
 # Set page configuration
 st.set_page_config(
@@ -86,8 +88,7 @@ with tab1:
 
         # return results
         with st.spinner("Running inference..."):
-            time.sleep(3)
-            final_response = "you are gay"
+            output = asyncio.run(forward_pass(tmp_file_path, prompt))
             st.success("Inference complete")
         
         # Handle file upload if one exists in session state
@@ -98,9 +99,9 @@ with tab1:
 
 
         # Add assistant's response to conversation history and display it
-        st.session_state.messages.append({"role": "assistant", "type": "text", "content": final_response})
+        st.session_state.messages.append({"role": "assistant", "type": "text", "content": output.sequences})
         with st.chat_message("assistant"):
-            st.markdown(final_response)
+            st.markdown(output.sequences)
 
         # Rerun the app to re-render the sidebar after updating the session state
         st.rerun()

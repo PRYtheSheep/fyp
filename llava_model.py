@@ -75,37 +75,40 @@ else:
 
 # Define a chat history and use `apply_chat_template` to get correctly formatted prompt
 # Each value in "content" has to be a list of dicts with types ("text", "image") 
-conversation = [
-    {
 
-      "role": "user",
-      "content": [
-          {"type": "text", "text": "What is the colour of this object?"},
-          {"type": "image"},
-        ],
-    },
-]
-prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+async def forward_pass(image_path, prompt):
 
-image_file = r"C:\Users\Dreamcore\Downloads\61-gPGG7umL._UF894,1000_QL80_.jpg"
-raw_image = Image.open(image_file).convert("RGB")
-inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
+    conversation = [
+        {
 
-output = model.generate(
-    **inputs, 
-    max_new_tokens=200, 
-    do_sample=False,
-    use_cache=True,
-    output_attentions=True,
-    output_hidden_states=True,
-    return_dict_in_generate=True,
-    output_scores=True,
-    eos_token_id=eos_token_id
-)
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image"},
+            ],
+        },
+    ]
+    prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
 
-for h in hooks_pre_encoder:
-    h.remove()
-for h in hooks_pre_encoder_vit:
-    h.remove()
+    raw_image = Image.open(image_path).convert("RGB")
+    inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
 
-print(processor.decode(output.sequences[0], skip_special_tokens=True))
+    output = model.generate(
+        **inputs, 
+        max_new_tokens=200, 
+        do_sample=False,
+        use_cache=True,
+        output_attentions=True,
+        output_hidden_states=True,
+        return_dict_in_generate=True,
+        output_scores=True,
+        eos_token_id=eos_token_id
+    )
+
+    for h in hooks_pre_encoder:
+        h.remove()
+    for h in hooks_pre_encoder_vit:
+        h.remove()
+
+    # print(processor.decode(output.sequences[0], skip_special_tokens=True))
+    return output
