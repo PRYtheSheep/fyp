@@ -2,171 +2,117 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
+import os
+import tempfile
+import time
 
 # Set page configuration
 st.set_page_config(
-    page_title="My Tabbed App",
+    page_title="FYP Visual analytics tool",
     page_icon="📊",
     layout="wide"
 )
 
-# Main title
-st.title("A visual analytics tool for explainable large VLMs")
-st.markdown("---")
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "uploaded_file" not in st.session_state:
+    st.session_state.uploaded_file = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0  # counter for unique widget IDs
+
+# Sidebar container for uploader only
+uploader_container = st.sidebar.empty()
+
+def render_uploader():
+    with uploader_container.container():
+        uploaded = st.file_uploader(
+            "Upload an Image, Audio, or Video",
+            type=["jpg", "jpeg", "png", "mp3", "wav", "mp4", "mov", "avi"],
+            key=f"uploader_{st.session_state.uploader_key}",
+        )
+        
+        tmp_file_path = None
+        
+        if uploaded:
+            # New file uploaded
+            st.session_state.uploaded_file = uploaded
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded.name)[1]) as tmp_file:
+                tmp_file.write(uploaded.read())
+                tmp_file_path = tmp_file.name
+        else:
+            # No file (either never uploaded or X was clicked)
+            st.session_state.uploaded_file = None
+        
+        # Show preview only if we currently have a file
+        if st.session_state.get('uploaded_file'):
+            file_type = st.session_state.uploaded_file.type
+            if "image" in file_type:
+                st.image(st.session_state.uploaded_file, caption="Selected Image")
+            elif "audio" in file_type:
+                st.audio(st.session_state.uploaded_file)
+            elif "video" in file_type:
+                st.video(st.session_state.uploaded_file)
+        
+        return uploaded, tmp_file_path
+
+uploaded_file,tmp_file_path = render_uploader()
 
 # Create tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Hidden Representations", "Misc."])
 
 # Tab 1: Data Analysis
 with tab1:
-    st.header("Data Analysis")
-    
-    # Generate sample data
-    @st.cache_data
-    def load_sample_data():
-        dates = pd.date_range('2023-01-01', periods=100)
-        data = {
-            'Date': dates,
-            'Sales': np.random.normal(1000, 200, 100),
-            'Customers': np.random.poisson(50, 100),
-            'Category': np.random.choice(['A', 'B', 'C'], 100)
-        }
-        return pd.DataFrame(data)
-    
-    df = load_sample_data()
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Sales Over Time")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(df['Date'], df['Sales'])
-        ax.set_title('Daily Sales Trend')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Sales')
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-    
-    with col2:
-        st.subheader("Sales by Category")
-        category_sales = df.groupby('Category')['Sales'].sum()
-        fig2, ax2 = plt.subplots(figsize=(8, 8))
-        ax2.pie(category_sales.values, labels=category_sales.index, autopct='%1.1f%%')
-        ax2.set_title('Sales Distribution by Category')
-        st.pyplot(fig2)
-    
-    st.subheader("Raw Data")
-    st.dataframe(df, use_container_width=True)
+    # Create dropdown from DataFrame column
+    selected_model = st.selectbox(
+        "Model:",
+        [
+            "LLaVa-1.5-7b"
+        ],
+        help="Choose a VLM"
+    )
+
+    # Display conversation history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            if msg["type"] == "text":
+                st.markdown(msg["content"])
+
+    # Text input box
+    if prompt := st.chat_input("Type your message..."):
+        
+        # Add user prompt to history
+        st.session_state.messages.append({"role": "user", "type": "text", "content": prompt})
+
+        # return results
+        with st.spinner("Running inference..."):
+            time.sleep(3)
+            final_response = "you are gay"
+            st.success("Inference complete")
+        
+        # Handle file upload if one exists in session state
+        if st.session_state.uploaded_file:
+
+            st.session_state.uploader_key += 1  # Increment the key to force a reset of the file uploader
+            st.session_state.uploaded_file = None  # Clear the uploaded file from session state
+
+
+        # Add assistant's response to conversation history and display it
+        st.session_state.messages.append({"role": "assistant", "type": "text", "content": final_response})
+        with st.chat_message("assistant"):
+            st.markdown(final_response)
+
+        # Rerun the app to re-render the sidebar after updating the session state
+        st.rerun()
 
 # Tab 2: Form Input
 with tab2:
-    st.header("User Input Form")
-    
-    with st.form("user_form"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            name = st.text_input("Name")
-            email = st.text_input("Email")
-            age = st.number_input("Age", min_value=0, max_value=120, value=25)
-        
-        with col2:
-            department = st.selectbox("Department", 
-                                    ["Sales", "Marketing", "Engineering", "HR"])
-            experience = st.slider("Years of Experience", 0, 40, 5)
-            subscribe = st.checkbox("Subscribe to newsletter")
-        
-        comments = st.text_area("Additional Comments")
-        
-        submitted = st.form_submit_button("Submit")
-        
-        if submitted:
-            st.success("Form submitted successfully!")
-            st.write("**Submitted Information:**")
-            st.write(f"- Name: {name}")
-            st.write(f"- Email: {email}")
-            st.write(f"- Age: {age}")
-            st.write(f"- Department: {department}")
-            st.write(f"- Experience: {experience} years")
-            st.write(f"- Newsletter: {'Yes' if subscribe else 'No'}")
-            if comments:
-                st.write(f"- Comments: {comments}")
+    st.write("Attention")
 
 # Tab 3: Maps
 with tab3:
     st.header("Interactive Maps")
-    
-    # Generate sample location data
-    @st.cache_data
-    def generate_map_data():
-        return pd.DataFrame({
-            'lat': np.random.normal(37.7749, 0.1, 100),
-            'lon': np.random.normal(-122.4194, 0.1, 100),
-            'size': np.random.randint(20, 100, 100),
-            'color': np.random.choice(['red', 'blue', 'green', 'orange'], 100)
-        })
-    
-    map_data = generate_map_data()
-    
-    st.subheader("Sample Locations Map")
-    st.map(map_data[['lat', 'lon']])
-    
-    st.subheader("Map Configuration")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        zoom_level = st.slider("Zoom Level", 1, 20, 10)
-        show_labels = st.checkbox("Show Labels", value=True)
-    
-    with col2:
-        map_style = st.selectbox("Map Style", 
-                                ["Default", "Satellite", "Terrain"])
-        point_size = st.slider("Point Size", 1, 10, 5)
 
 # Tab 4: Settings
 with tab4:
-    st.header("Application Settings")
-    
-    st.subheader("Display Preferences")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        theme = st.selectbox("Theme", ["Light", "Dark", "Auto"])
-        language = st.selectbox("Language", ["English", "Spanish", "French", "German"])
-    
-    with col2:
-        timezone = st.selectbox("Timezone", 
-                               ["UTC", "EST", "PST", "GMT", "CET"])
-        date_format = st.selectbox("Date Format", 
-                                  ["MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"])
-    
-    st.subheader("Notifications")
-    email_notifications = st.checkbox("Email Notifications", value=True)
-    push_notifications = st.checkbox("Push Notifications", value=False)
-    weekly_reports = st.checkbox("Weekly Reports", value=True)
-    
-    st.subheader("Data Management")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        auto_save = st.checkbox("Auto-save", value=True)
-        backup_frequency = st.selectbox("Backup Frequency", 
-                                       ["Daily", "Weekly", "Monthly"])
-    
-    with col2:
-        data_retention = st.number_input("Data Retention (days)", 
-                                        min_value=1, max_value=365, value=90)
-    
-    if st.button("Save Settings", type="primary"):
-        st.success("Settings saved successfully!")
-        st.balloons()
-
-# Sidebar (optional)
-with st.sidebar:
-    st.header("Navigation")
-    st.write("Use the tabs above to navigate between different sections of the application.")
-    
-    st.header("Quick Stats")
-    st.metric("Total Users", "1,234", "12")
-    st.metric("Active Sessions", "56", "-2")
-    st.metric("Revenue", "$12,345", "8%")
+    st.write("Misc")
