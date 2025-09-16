@@ -1,12 +1,12 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 from matplotlib import pyplot as plt
 import os
 import tempfile
-import time
-from llava_model import forward_pass
-import asyncio
+from pathlib import Path
+from llava_model import forward_pass, clear_memory, vit_attn_folder
+import torch
+import torch.nn.functional as F
+from PIL import Image
 
 # Set page configuration
 st.set_page_config(
@@ -63,7 +63,6 @@ uploaded_file,tmp_file_path = render_uploader()
 # Create tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Hidden Representations", "Misc."])
 
-# Tab 1: Data Analysis
 with tab1:
     # Create dropdown from DataFrame column
     selected_model = st.selectbox(
@@ -88,14 +87,15 @@ with tab1:
 
         # return results
         with st.spinner("Running inference..."):
-            processor, output = asyncio.run(forward_pass(tmp_file_path, prompt))
+            clear_memory()
+            processor, output = forward_pass(tmp_file_path, prompt)
             st.success("Inference complete")
         
-        # Handle file upload if one exists in session state
-        if st.session_state.uploaded_file:
+        # # Handle file upload if one exists in session state
+        # if st.session_state.uploaded_file:
 
-            st.session_state.uploader_key += 1  # Increment the key to force a reset of the file uploader
-            st.session_state.uploaded_file = None  # Clear the uploaded file from session state
+        #     st.session_state.uploader_key += 1  # Increment the key to force a reset of the file uploader
+        #     st.session_state.uploaded_file = None  # Clear the uploaded file from session state
 
 
         # Add assistant's response to conversation history and display it
@@ -106,14 +106,51 @@ with tab1:
         # Rerun the app to re-render the sidebar after updating the session state
         st.rerun()
 
-# Tab 2: Form Input
 with tab2:
-    st.write("Attention")
+    clear_memory()
+    # Band aid fix to prevent that stupid error
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    st.write("ViT Attention")
 
-# Tab 3: Maps
+    vit_layer = [i for i in range(24)]
+    selected_vit_layer = st.selectbox(
+        "ViT Attention Layer:",
+        vit_layer,
+        label_visibility="collapsed"
+    )
+    folder = Path(vit_attn_folder)
+    vit_attn_files = sorted(
+        [f.name for f in folder.iterdir() if f.is_file()],
+        key=lambda x: int(Path(x).stem)  # convert "3.pt" -> 3
+    )
+
+    if len(vit_attn_files) == 0:
+        st.write("No ViT attn weights, run the generation first")
+    else:
+        if tmp_file_path is None:
+            st.write("Upload image for display")
+        else:
+            attn = torch.load(os.path.join(vit_attn_folder, vit_attn_files[selected_vit_layer]))
+            attn_avg = attn[0].mean(dim=0)
+            cls_attn = attn_avg[0, 1:]  # exclude CLS itself
+            H, W = 24, 24  # 336 / 14
+            heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
+
+            # Assuming heatmap shape [H, W]
+            raw_image = Image.open(tmp_file_path).convert("RGB")
+            heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
+            heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='bilinear')[0,0].numpy()
+
+            fig, ax = plt.subplots()
+            ax.imshow(raw_image)
+            ax.imshow(heatmap_full, cmap='jet', alpha=0.75) 
+            ax.axis("off")
+
+            # Display in Streamlit
+            st.pyplot(fig)
+    
 with tab3:
     st.header("Interactive Maps")
 
-# Tab 4: Settings
 with tab4:
     st.write("Misc")

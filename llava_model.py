@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
-vit_attn_folder = r"saved/vit_attn"
+# Use absolute path
+vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
 
 model_id = "llava-hf/llava-1.5-7b-hf"
 model = LlavaForConditionalGeneration.from_pretrained(
@@ -77,7 +78,7 @@ else:
     eos_token_id = processor.tokenizer.eos_token_id
 
 
-async def forward_pass(image_path, prompt):
+def forward_pass(image_path, prompt):
 
     conversation = [
         {
@@ -96,7 +97,7 @@ async def forward_pass(image_path, prompt):
 
     output = model.generate(
         **inputs, 
-        max_new_tokens=200, 
+        max_new_tokens=50, 
         do_sample=False,
         use_cache=True,
         output_attentions=True,
@@ -113,13 +114,13 @@ async def forward_pass(image_path, prompt):
 
     # Save the output and attention weights
     for i, attn in enumerate(model.enc_attn_weights_vit):
-        file_path = os.path.join(vit_attn_folder, f"{str(i)}.pt")
+        file_path = os.path.join(vit_attn_folder, f"{i}.pt")
         print(file_path)
         torch.save(attn, file_path)
 
     return processor, output
 
-async def clear_memory():
+def clear_memory():
     model.enc_attn_weights.clear()
     model.enc_attn_weights_vit.clear()
     torch.cuda.empty_cache()
