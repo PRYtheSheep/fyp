@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoProcessor, LlavaForConditionalGeneration
+import os
 
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -11,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
+
+vit_attn_folder = r"saved/vit_attn"
 
 model_id = "llava-hf/llava-1.5-7b-hf"
 model = LlavaForConditionalGeneration.from_pretrained(
@@ -73,8 +76,6 @@ if model.language_model.config.model_type == "gemma":
 else:
     eos_token_id = processor.tokenizer.eos_token_id
 
-# Define a chat history and use `apply_chat_template` to get correctly formatted prompt
-# Each value in "content" has to be a list of dicts with types ("text", "image") 
 
 async def forward_pass(image_path, prompt):
 
@@ -110,5 +111,15 @@ async def forward_pass(image_path, prompt):
     for h in hooks_pre_encoder_vit:
         h.remove()
 
-    # print(processor.decode(output.sequences[0], skip_special_tokens=True))
-    return output
+    # Save the output and attention weights
+    for i, attn in enumerate(model.enc_attn_weights_vit):
+        file_path = os.path.join(vit_attn_folder, f"{str(i)}.pt")
+        print(file_path)
+        torch.save(attn, file_path)
+
+    return processor, output
+
+async def clear_memory():
+    model.enc_attn_weights.clear()
+    model.enc_attn_weights_vit.clear()
+    torch.cuda.empty_cache()
