@@ -89,6 +89,7 @@ with tab1:
         with st.spinner("Running inference..."):
             # Instantiate the model 
             model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
+            st.success("Model instantiated")
             # Run a forward pass
             output = forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, prompt)
             st.success("Inference complete")
@@ -99,6 +100,8 @@ with tab1:
         #     st.session_state.uploader_key += 1  # Increment the key to force a reset of the file uploader
         #     st.session_state.uploaded_file = None  # Clear the uploaded file from session state
 
+        # Save the output sequences and first forward pass LM attentions since its already generated anyways
+    
 
         # Add assistant's response to conversation history and display it
         st.session_state.messages.append({"role": "assistant", "type": "text", "content": processor.decode(output.sequences[0], skip_special_tokens=False)})
@@ -109,46 +112,63 @@ with tab1:
         st.rerun()
 
 with tab2:
-    # Band aid fix to prevent that stupid error
-    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-    st.write("ViT Attention")
+    # Nested tabs
+    tab5, tab6 = st.tabs(["ViT Attention", "Attenion Rollout"])
 
-    vit_layer = [i for i in range(24)]
-    selected_vit_layer = st.selectbox(
-        "ViT Attention Layer:",
-        vit_layer,
-        label_visibility="collapsed"
-    )
-    folder = Path(vit_attn_folder)
-    vit_attn_files = sorted(
-        [f.name for f in folder.iterdir() if f.is_file()],
-        key=lambda x: int(Path(x).stem)  # convert "3.pt" -> 3
-    )
+    with tab5:
+        # Band aid fix to prevent that stupid error
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        st.write("ViT Attention")
 
-    if len(vit_attn_files) == 0:
-        st.write("No ViT attn weights, run the generation first")
-    else:
-        if tmp_file_path is None:
-            st.write("Upload image for display")
+        vit_layer = [i for i in range(24)]
+        selected_vit_layer = st.selectbox(
+            "ViT Attention Layer:",
+            vit_layer,
+            label_visibility="collapsed"
+        )
+        folder = Path(vit_attn_folder)
+        vit_attn_files = sorted(
+            [f.name for f in folder.iterdir() if f.is_file()],
+            key=lambda x: int(Path(x).stem)  # convert "3.pt" -> 3
+        )
+
+        if len(vit_attn_files) == 0:
+            st.write("No ViT attn weights, run the generation first")
         else:
-            attn = torch.load(os.path.join(vit_attn_folder, vit_attn_files[selected_vit_layer]))
-            attn_avg = attn[0].mean(dim=0)
-            cls_attn = attn_avg[0, 1:]  # exclude CLS itself
-            H, W = 24, 24  # 336 / 14
-            heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
+            if tmp_file_path is None:
+                st.write("Upload image for display")
+            else:
+                attn = torch.load(os.path.join(vit_attn_folder, vit_attn_files[selected_vit_layer]))
+                attn_avg = attn[0].mean(dim=0)
+                cls_attn = attn_avg[0, 1:]  # exclude CLS itself
+                H, W = 24, 24  # 336 / 14
+                heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
 
-            # Assuming heatmap shape [H, W]
-            raw_image = Image.open(tmp_file_path).convert("RGB")
-            heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
-            heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='bilinear')[0,0].numpy()
+                # Assuming heatmap shape [H, W]
+                raw_image = Image.open(tmp_file_path).convert("RGB")
+                heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
+                heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='bilinear')[0,0].numpy()
 
-            fig, ax = plt.subplots()
-            ax.imshow(raw_image)
-            ax.imshow(heatmap_full, cmap='jet', alpha=0.75) 
-            ax.axis("off")
+                fig, ax = plt.subplots()
+                ax.imshow(raw_image)
+                ax.imshow(heatmap_full, cmap='jet', alpha=0.75) 
+                ax.axis("off")
 
-            # Display in Streamlit
-            st.pyplot(fig)
+                # Display in Streamlit
+                st.pyplot(fig)
+
+    with tab6:
+        # Display the generated tokens
+        sentence = "I want to display a sentence in streamlit where the user can click on each word"
+        words = sentence.split()
+
+        st.write("### Clickable Words (Horizontal)")
+
+        cols = st.columns(len(words))  # create one column per word
+
+        for i, word in enumerate(words):
+            if cols[i].button(word, key=f"word_{i}"):
+                st.write(f"You clicked: **{word}**")
     
 with tab3:
     st.header("Interactive Maps")

@@ -14,7 +14,7 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
+vit_attn_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved\vit_attn"
 
 def instantiate_model():
     """
