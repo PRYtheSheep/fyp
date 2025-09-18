@@ -16,69 +16,78 @@ setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(ge
 # Use absolute path
 vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
 
-model_id = "llava-hf/llava-1.5-7b-hf"
-model = LlavaForConditionalGeneration.from_pretrained(
-    model_id, 
-    torch_dtype=torch.float16, 
-    low_cpu_mem_usage=True, 
-    attn_implementation = "eager"
-).to(0)
+def instantiate_model():
+    """
+    Instantiates a LLaVa model and returns the model, processor and hooks. Only instantiate 1 model at a time due to GPU memory limits.
+    Use del to delete the model, processor and hooks before instantiating a new model
+    """
+    model_id = "llava-hf/llava-1.5-7b-hf"
+    model = LlavaForConditionalGeneration.from_pretrained(
+        model_id, 
+        torch_dtype=torch.float16, 
+        low_cpu_mem_usage=True, 
+        attn_implementation = "eager"
+    ).to(0)
 
-#--------------------------------------------------
-model.vision_tower.config.output_attentions = True
+    #--------------------------------------------------
+    model.vision_tower.config.output_attentions = True
 
-# set hooks to get attention weights
-model.enc_attn_weights = []
-#outputs: attn_output, attn_weights, past_key_value
-def forward_hook(module, inputs, output): 
-    if output[1] is None:
-        logger.error(
-            ("Attention weights were not returned for the encoder. "
-            "To enable, set output_attentions=True in the forward pass of the model. ")
-        )
-        return output
-    
-    output[1].requires_grad_(True)
-    output[1].retain_grad()
-    model.enc_attn_weights.append(output[1].detach().cpu())
-    return output
-
-hooks_pre_encoder, hooks_encoder = [], []
-for layer in model.language_model.layers:
-    hook_encoder_layer = layer.self_attn.register_forward_hook(forward_hook)
-    hooks_pre_encoder.append(hook_encoder_layer)
-
-model.enc_attn_weights_vit = []
-
-def forward_hook_image_processor(module, inputs, output): 
-    if output[1] is None:
-        logger.warning(
-            ("Attention weights were not returned for the vision model. "
-             "Relevancy maps will not be calculated for the vision model. " 
-             "To enable, set output_attentions=True in the forward pass of vision_tower. ")
-        )
+    # set hooks to get attention weights
+    model.enc_attn_weights = []
+    #outputs: attn_output, attn_weights, past_key_value
+    def forward_hook(module, inputs, output): 
+        if output[1] is None:
+            logger.error(
+                ("Attention weights were not returned for the encoder. "
+                "To enable, set output_attentions=True in the forward pass of the model. ")
+            )
+            return output
+        
+        output[1].requires_grad_(True)
+        output[1].retain_grad()
+        model.enc_attn_weights.append(output[1].detach().cpu())
         return output
 
-    output[1].requires_grad_(True)
-    output[1].retain_grad()
-    model.enc_attn_weights_vit.append(output[1])
-    return output
+    hooks_pre_encoder, hooks_encoder = [], []
+    for layer in model.language_model.layers:
+        hook_encoder_layer = layer.self_attn.register_forward_hook(forward_hook)
+        hooks_pre_encoder.append(hook_encoder_layer)
 
-hooks_pre_encoder_vit = []
-for layer in model.vision_tower.vision_model.encoder.layers:
-    hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
-    hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
-#--------------------------------------------------
+    model.enc_attn_weights_vit = []
 
-processor = AutoProcessor.from_pretrained(model_id)
+    def forward_hook_image_processor(module, inputs, output): 
+        if output[1] is None:
+            logger.warning(
+                ("Attention weights were not returned for the vision model. "
+                "Relevancy maps will not be calculated for the vision model. " 
+                "To enable, set output_attentions=True in the forward pass of vision_tower. ")
+            )
+            return output
 
-if model.language_model.config.model_type == "gemma":
-    eos_token_id = processor.tokenizer('<end_of_turn>', add_special_tokens=False).input_ids[0]
-else:
-    eos_token_id = processor.tokenizer.eos_token_id
+        output[1].requires_grad_(True)
+        output[1].retain_grad()
+        model.enc_attn_weights_vit.append(output[1])
+        return output
 
+    hooks_pre_encoder_vit = []
+    for layer in model.vision_tower.vision_model.encoder.layers:
+        hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
+        hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
+    #--------------------------------------------------
 
-def forward_pass(image_path, prompt):
+    processor = AutoProcessor.from_pretrained(model_id)
+
+    if model.language_model.config.model_type == "gemma":
+        eos_token_id = processor.tokenizer('<end_of_turn>', add_special_tokens=False).input_ids[0]
+    else:
+        eos_token_id = processor.tokenizer.eos_token_id
+
+    return model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id
+
+def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, image_path, prompt):
+    """
+    Run a forward passwith model.generate()
+    """
 
     conversation = [
         {
@@ -115,12 +124,6 @@ def forward_pass(image_path, prompt):
     # Save the output and attention weights
     for i, attn in enumerate(model.enc_attn_weights_vit):
         file_path = os.path.join(vit_attn_folder, f"{i}.pt")
-        print(file_path)
         torch.save(attn, file_path)
 
-    return processor, output
-
-def clear_memory():
-    model.enc_attn_weights.clear()
-    model.enc_attn_weights_vit.clear()
-    torch.cuda.empty_cache()
+    return output

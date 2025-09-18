@@ -3,7 +3,7 @@ from matplotlib import pyplot as plt
 import os
 import tempfile
 from pathlib import Path
-from llava_model import forward_pass, clear_memory, vit_attn_folder
+from llava_model import instantiate_model, forward_pass, vit_attn_folder
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -87,8 +87,10 @@ with tab1:
 
         # return results
         with st.spinner("Running inference..."):
-            clear_memory()
-            processor, output = forward_pass(tmp_file_path, prompt)
+            # Instantiate the model 
+            model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
+            # Run a forward pass
+            output = forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, prompt)
             st.success("Inference complete")
         
         # # Handle file upload if one exists in session state
@@ -99,15 +101,14 @@ with tab1:
 
 
         # Add assistant's response to conversation history and display it
-        st.session_state.messages.append({"role": "assistant", "type": "text", "content": processor.decode(output.sequences[0], skip_special_tokens=True)})
+        st.session_state.messages.append({"role": "assistant", "type": "text", "content": processor.decode(output.sequences[0], skip_special_tokens=False)})
         with st.chat_message("assistant"):
-            st.markdown(processor.decode(output.sequences[0], skip_special_tokens=True))
+            st.markdown(processor.decode(output.sequences[0], skip_special_tokens=False))
 
         # Rerun the app to re-render the sidebar after updating the session state
         st.rerun()
 
 with tab2:
-    clear_memory()
     # Band aid fix to prevent that stupid error
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
     st.write("ViT Attention")
