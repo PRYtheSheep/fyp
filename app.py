@@ -196,9 +196,9 @@ with tab2:
             with open(file_path, "r") as f:
                 num_forward_pass = int(f.read())
 
-            st.write(num_forward_pass)
+            st.write(f"No. of forward passes: {num_forward_pass}")
             # List of expanders
-            expanders = ["Expander 1", "Expander 2", "Expander 3"]
+            expanders = list(range(-num_forward_pass, 0, 1))
 
             # Initialize session state for lazy loading
             for exp in expanders:
@@ -207,7 +207,7 @@ with tab2:
 
             # Create each expander
             for exp in expanders:
-                with st.expander(exp):
+                with st.expander(decoded_tokens[exp]):
                     # Button inside each expander to trigger lazy load
                     if st.button(f"Load content for {exp}", key=f"btn_{exp}"):
                         st.session_state[f"show_{exp}"] = True
