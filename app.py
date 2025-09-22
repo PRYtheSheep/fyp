@@ -1,12 +1,14 @@
 import streamlit as st
 from matplotlib import pyplot as plt
 import os
+import re
 import tempfile
 from pathlib import Path
-from llava_model import instantiate_model, forward_pass, vit_attn_folder
+from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder
 import torch
 import torch.nn.functional as F
 from PIL import Image
+import time
 
 # Set page configuration
 st.set_page_config(
@@ -108,6 +110,9 @@ with tab1:
         with st.chat_message("assistant"):
             st.markdown(processor.decode(output.sequences[0], skip_special_tokens=False))
 
+        # Delete the model variables to free up VRAM
+        del model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+
         # Rerun the app to re-render the sidebar after updating the session state
         st.rerun()
 
@@ -115,6 +120,7 @@ with tab2:
     # Nested tabs
     tab5, tab6 = st.tabs(["ViT Attention", "Attenion Rollout"])
 
+    # ViT attention tab
     with tab5:
         # Band aid fix to prevent that stupid error
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -157,18 +163,61 @@ with tab2:
                 # Display in Streamlit
                 st.pyplot(fig)
 
+    #Attention rollout tab
     with tab6:
-        # Display the generated tokens
-        sentence = "I want to display a sentence in streamlit where the user can click on each word"
-        words = sentence.split()
+        # Load the generated text
+        folder = Path(vit_attn_folder)
+        files = [f for f in folder.iterdir() if f.is_file()]
 
-        st.write("### Clickable Words (Horizontal)")
+        if len(files) == 0:
+            st.write("Run a forward pass in Generation tab first")
+        else:
+            output_sequences = torch.load(os.path.join(generated_folder, "generated.pt"))
+            processor = get_processor()
 
-        cols = st.columns(len(words))  # create one column per word
+            generated_tokens_raw = processor.decode(output_sequences[0], skip_special_tokens=False)
+            pattern = "<image>"
+            count = len(re.findall(pattern, generated_tokens_raw))
+            # Build the string to display
+            generated_tokens_raw_after_image_tokens = generated_tokens_raw[7*count+10:]
+            split = generated_tokens_raw_after_image_tokens.split("ASSISTANT:")
+            user_prompt = f"<s>USER:<{count} image token(s)>{split[0].strip()} ASSISTANT:"
+            st.title("User Prompt:")
+            st.markdown(f"```\n{user_prompt}\n```")
+            st.title("Output:")
+            st.markdown(f"```\n{split[1].strip()}\n```")
 
-        for i, word in enumerate(words):
-            if cols[i].button(word, key=f"word_{i}"):
-                st.write(f"You clicked: **{word}**")
+            decoded_tokens = [processor.decode([t]) for t in output_sequences[0].tolist()]
+            with st.expander("Full output"):
+                st.write(decoded_tokens)
+
+            st.title("Attention Rollout")
+            file_path = os.path.join(generated_folder, "num.txt")
+            with open(file_path, "r") as f:
+                num_forward_pass = int(f.read())
+
+            st.write(num_forward_pass)
+            # List of expanders
+            expanders = ["Expander 1", "Expander 2", "Expander 3"]
+
+            # Initialize session state for lazy loading
+            for exp in expanders:
+                if f"show_{exp}" not in st.session_state:
+                    st.session_state[f"show_{exp}"] = False
+
+            # Create each expander
+            for exp in expanders:
+                with st.expander(exp):
+                    # Button inside each expander to trigger lazy load
+                    if st.button(f"Load content for {exp}", key=f"btn_{exp}"):
+                        st.session_state[f"show_{exp}"] = True
+
+                    # Show content only if triggered
+                    if st.session_state[f"show_{exp}"]:
+                        with st.spinner(f"Loading {exp}..."):
+                            time.sleep(2)  # simulate heavy computation
+                        st.write(f"✅ {exp} content loaded!")
+                        st.line_chart([i for i in range(5)])
     
 with tab3:
     st.header("Interactive Maps")

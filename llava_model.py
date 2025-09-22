@@ -14,14 +14,19 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-vit_attn_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved\vit_attn"
+vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
+generated_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\generated"
+
+model_id = "llava-hf/llava-1.5-7b-hf"
+
+def get_processor():
+    return AutoProcessor.from_pretrained(model_id)
 
 def instantiate_model():
     """
     Instantiates a LLaVa model and returns the model, processor and hooks. Only instantiate 1 model at a time due to GPU memory limits.
     Use del to delete the model, processor and hooks before instantiating a new model
     """
-    model_id = "llava-hf/llava-1.5-7b-hf"
     model = LlavaForConditionalGeneration.from_pretrained(
         model_id, 
         torch_dtype=torch.float16, 
@@ -121,9 +126,18 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
     for h in hooks_pre_encoder_vit:
         h.remove()
 
-    # Save the output and attention weights
+    # Save the vit attention weights
     for i, attn in enumerate(model.enc_attn_weights_vit):
         file_path = os.path.join(vit_attn_folder, f"{i}.pt")
         torch.save(attn, file_path)
+
+    # Save the output sequence
+    file_path = os.path.join(generated_folder, "generated.pt")
+    torch.save(output.sequences, file_path)
+
+    num_forward_pass = int(len(model.enc_attn_weights)/32)
+    file_path = os.path.join(generated_folder, "num.txt")
+    with open(file_path, "w") as f:
+        f.write(str(num_forward_pass))
 
     return output
