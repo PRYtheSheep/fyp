@@ -196,9 +196,9 @@ with tab2:
             with open(file_path, "r") as f:
                 num_forward_pass = int(f.read())
 
-            st.write(num_forward_pass)
+            st.warning("Generating the rollout for a forward pass will instantiate the model and run a forward pass. Only generate 1 rollout at a time.")
             # List of expanders
-            expanders = ["Expander 1", "Expander 2", "Expander 3"]
+            expanders = [i for i in range(-num_forward_pass, 0, 1)]
 
             # Initialize session state for lazy loading
             for exp in expanders:
@@ -207,17 +207,20 @@ with tab2:
 
             # Create each expander
             for exp in expanders:
-                with st.expander(exp):
+                with st.expander(f"{decoded_tokens[exp]}"):
                     # Button inside each expander to trigger lazy load
-                    if st.button(f"Load content for {exp}", key=f"btn_{exp}"):
+                    if st.button(f"Load attention rollout", key=f"btn_{exp}"):
                         st.session_state[f"show_{exp}"] = True
 
                     # Show content only if triggered
                     if st.session_state[f"show_{exp}"]:
-                        with st.spinner(f"Loading {exp}..."):
-                            time.sleep(2)  # simulate heavy computation
-                        st.write(f"✅ {exp} content loaded!")
-                        st.line_chart([i for i in range(5)])
+                        with st.spinner(f"Running inference for token: {decoded_tokens[exp]}"):
+                            assistant_prompt = None
+                            if exp != -num_forward_pass:
+                                st.write(decoded_tokens[-num_forward_pass:exp])
+                                st.write(processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False))
+
+                        st.success("Rollout generated")
     
 with tab3:
     st.header("Interactive Maps")

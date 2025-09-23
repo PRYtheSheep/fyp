@@ -16,6 +16,7 @@ setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(ge
 # Use absolute path
 vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
 generated_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\generated"
+attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\attn"
 
 model_id = "llava-hf/llava-1.5-7b-hf"
 
@@ -94,6 +95,11 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
     Run a forward passwith model.generate()
     """
 
+    # Save the original prompt before it gets yoinked by the processor
+    file_path = os.path.join(generated_folder, "original_prompt.txt")
+    with open(file_path, "w") as f:
+        f.write(prompt)
+
     conversation = [
         {
 
@@ -139,5 +145,49 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
     file_path = os.path.join(generated_folder, "num.txt")
     with open(file_path, "w") as f:
         f.write(str(num_forward_pass))
+
+    return output
+
+def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, image_path, prompt, assistant_prompt=None):
+    """
+    Run a forward passwith model()
+    """
+    conversation = [
+        {
+
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image"},
+            ],
+        },
+    ]
+    # Append assistant prompt into conversation if any
+    if assistant_prompt:
+        conversation += [
+            {"role": "assistant", "content": [{"type": "text", "text": assistant_prompt}]}
+        ]
+
+    prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    raw_image = Image.open(image_path).convert("RGB")
+    inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
+    
+    output = model(**inputs,
+                    use_cache=False,
+                    output_attentions=True,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    eos_token_id=eos_token_id)
+    
+    for h in hooks_pre_encoder:
+        h.remove()
+    for h in hooks_pre_encoder_vit:
+        h.remove()
+
+    # Save the model attn weights for testing
+    for i, attn in enumerate(model.enc_attn_weights):
+        file_path = os.path.join(attn_folder, f"{i}.pt")
+        torch.save(attn, file_path)
 
     return output
