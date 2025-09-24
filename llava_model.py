@@ -199,3 +199,30 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
         torch.save(attn, file_path)
 
     return output
+
+def attention_rollout_function(attn_maps):
+    """
+    Performs rollout on the provided attention maps. Pass in the model attn weights e.g. model.enc_attn_weights[0:32]
+    """
+    attn_rollout = []
+    device = attn_maps[0].device
+    batch_size, _, seq_len, _ = attn_maps[0].shape
+    
+    # Identity matrix for self-attention
+    I = torch.eye(seq_len, device=device).unsqueeze(0).expand(batch_size, seq_len, seq_len)
+
+    prod = I.clone()
+    
+    for i, attn_map in enumerate(attn_maps):
+        # Average over heads → [batch, seq_len, seq_len]
+        attn_map = attn_map.mean(dim=1)
+        
+        # Add identity and multiply
+        prod = prod @ (attn_map + I)
+        
+        # Normalize across sequence dimension
+        prod = prod / prod.sum(dim=-1, keepdim=True)
+        
+        attn_rollout.append(prod)
+
+    return attn_rollout

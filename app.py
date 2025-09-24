@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step
+from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout_function
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -25,6 +25,13 @@ if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0  # counter for unique widget IDs
+
+# Memory tracker sidebar
+memory_tracker_container = st.sidebar.empty()
+with memory_tracker_container.container():
+    st.sidebar.metric(label="cuda.memory_allocated", value=torch.cuda.memory_allocated(0)/1024/1024/1024)
+    st.sidebar.metric(label="cuda.memory_reserved", value=torch.cuda.memory_reserved(0)/1024/1024/1024)
+    st.sidebar.metric(label="cuda.max_memory_reserved", value=torch.cuda.max_memory_reserved(0)/1024/1024/1024)
 
 # Sidebar container for uploader only
 uploader_container = st.sidebar.empty()
@@ -225,14 +232,20 @@ with tab2:
                             
                             model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
                             st.success("Model instantiated")  
-                            st.write(f"assistant prompt is {assistant_prompt}")          
+                            st.write(f"assistant prompt is {assistant_prompt}")    
+
                             output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, user_prompt, assistant_prompt=assistant_prompt)
+                            st.success("Forward pass complete")
+
                             # Decode the next token
                             # Use -2 instead of -1 as the model appends a white space token to the end of the assistant
                             # prompt. Using -1 results in the wrong predicted token.
                             topk = torch.topk(output.logits[:, -2], k=1, dim=-1)
                             for ids in topk.indices:
                                 st.write(f"next token is: {processor_m.tokenizer.batch_decode(ids)}")
+
+                            # Run attention rollout on the enc_attn_weights
+                            
 
                             del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                             gc.collect()
