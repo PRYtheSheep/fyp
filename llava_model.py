@@ -179,7 +179,7 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
     prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
     raw_image = Image.open(image_path).convert("RGB")
     inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
-    
+    print(conversation)
     output = model(**inputs,
                     use_cache=False,
                     output_attentions=True,

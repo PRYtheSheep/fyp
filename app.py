@@ -206,6 +206,8 @@ with tab2:
             for exp in expanders:
                 if f"show_{exp}" not in st.session_state:
                     st.session_state[f"show_{exp}"] = False
+                if f"show_already_generated{exp}" not in st.session_state:
+                    st.session_state[f"show_already_generated{exp}"] = False
 
             # Create each expander
             for exp in expanders:
@@ -214,24 +216,29 @@ with tab2:
                     if st.button(f"Load attention rollout", key=f"btn_{exp}"):
                         st.session_state[f"show_{exp}"] = True
 
-                    # Show content only if triggered
-                    if st.session_state[f"show_{exp}"]:
+                    # Show content only if triggered and content has not been generated 
+                    if st.session_state[f"show_{exp}"] and not st.session_state[f"show_already_generated{exp}"]:
                         with st.spinner(f"Running inference for token: {decoded_tokens[exp]}"):
                             assistant_prompt = None
                             if exp != -num_forward_pass:
                                 assistant_prompt = processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False)
                             
                             model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
-                            st.success("Model instantiated")            
+                            st.success("Model instantiated")  
+                            st.write(f"assistant prompt is {assistant_prompt}")          
                             output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, user_prompt, assistant_prompt=assistant_prompt)
                             # Decode the next token
-                            topk = torch.topk(output.logits[:, -1], k=1, dim=-1)
+                            # Use -2 instead of -1 as the model appends a white space token to the end of the assistant
+                            # prompt. Using -1 results in the wrong predicted token.
+                            topk = torch.topk(output.logits[:, -2], k=1, dim=-1)
                             for ids in topk.indices:
                                 st.write(f"next token is: {processor_m.tokenizer.batch_decode(ids)}")
 
                             del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                             gc.collect()
 
+                        # Set already_generated flag 
+                        st.session_state[f"show_already_generated{exp}"] = True
                         st.success("Rollout generated")
     
 with tab3:
