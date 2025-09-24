@@ -4,11 +4,12 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder
+from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step
 import torch
 import torch.nn.functional as F
 from PIL import Image
 import time
+import gc
 
 # Set page configuration
 st.set_page_config(
@@ -112,6 +113,7 @@ with tab1:
 
         # Delete the model variables to free up VRAM
         del model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+        gc.collect()
 
         # Rerun the app to re-render the sidebar after updating the session state
         st.rerun()
@@ -217,8 +219,18 @@ with tab2:
                         with st.spinner(f"Running inference for token: {decoded_tokens[exp]}"):
                             assistant_prompt = None
                             if exp != -num_forward_pass:
-                                st.write(decoded_tokens[-num_forward_pass:exp])
-                                st.write(processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False))
+                                assistant_prompt = processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False)
+                            
+                            model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
+                            st.success("Model instantiated")            
+                            output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, user_prompt, assistant_prompt=assistant_prompt)
+                            # Decode the next token
+                            topk = torch.topk(output.logits[:, -1], k=1, dim=-1)
+                            for ids in topk.indices:
+                                st.write(f"next token is: {processor_m.tokenizer.batch_decode(ids)}")
+
+                            del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+                            gc.collect()
 
                         st.success("Rollout generated")
     

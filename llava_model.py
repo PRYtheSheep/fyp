@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoProcessor, LlavaForConditionalGeneration
 import os
-
+from transformers import BitsAndBytesConfig
 import matplotlib.pyplot as plt
 from PIL import Image
 from tqdm import tqdm
@@ -14,11 +14,20 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-vit_attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\vit_attn"
-generated_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\generated"
-attn_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved\attn"
+save_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved"
+vit_attn_folder = os.path.join(save_folder, "vit_attn")
+generated_folder = os.path.join(save_folder, "generated")
+attn_folder = os.path.join(save_folder, "attn")
 
 model_id = "llava-hf/llava-1.5-7b-hf"
+
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    offload_state_dict=True
+)
 
 def get_processor():
     return AutoProcessor.from_pretrained(model_id)
@@ -32,7 +41,8 @@ def instantiate_model():
         model_id, 
         torch_dtype=torch.float16, 
         low_cpu_mem_usage=True, 
-        attn_implementation = "eager"
+        quantization_config=quant_config,
+        attn_implementation = "eager",
     ).to(0)
 
     #--------------------------------------------------
@@ -102,7 +112,6 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
 
     conversation = [
         {
-
         "role": "user",
         "content": [
             {"type": "text", "text": prompt},
@@ -154,7 +163,6 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
     """
     conversation = [
         {
-
         "role": "user",
         "content": [
             {"type": "text", "text": prompt},
@@ -163,7 +171,7 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
         },
     ]
     # Append assistant prompt into conversation if any
-    if assistant_prompt:
+    if assistant_prompt is not None:
         conversation += [
             {"role": "assistant", "content": [{"type": "text", "text": assistant_prompt}]}
         ]
