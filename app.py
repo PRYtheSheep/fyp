@@ -234,7 +234,11 @@ with tab2:
                             st.success("Model instantiated")  
                             st.write(f"assistant prompt is {assistant_prompt}")    
 
-                            output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, user_prompt, assistant_prompt=assistant_prompt)
+                            file_path = os.path.join(generated_folder, "original_prompt.txt")
+                            with open(file_path, "r") as f:
+                                original_prompt = f.read()
+
+                            output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, original_prompt, assistant_prompt=assistant_prompt)
                             st.success("Forward pass complete")
 
                             # Decode the next token
@@ -242,7 +246,7 @@ with tab2:
                             # prompt. Using -1 results in the wrong predicted token.
                             topk = torch.topk(output.logits[:, -2], k=1, dim=-1)
                             for ids in topk.indices:
-                                st.write(f"next token is: {processor_m.tokenizer.batch_decode(ids)}")
+                                st.write(f"next token is: {processor_m.tokenizer.decode(ids)}")
 
                             # Run attention rollout on the enc_attn_weights
                             

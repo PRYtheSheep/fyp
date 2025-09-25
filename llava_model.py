@@ -14,7 +14,7 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-save_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved"
+save_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved"
 vit_attn_folder = os.path.join(save_folder, "vit_attn")
 generated_folder = os.path.join(save_folder, "generated")
 attn_folder = os.path.join(save_folder, "attn")
@@ -175,11 +175,15 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
         conversation += [
             {"role": "assistant", "content": [{"type": "text", "text": assistant_prompt}]}
         ]
-
-    prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+    print(conversation)
+    prompt = processor.apply_chat_template(conversation, add_generation_prompt=False, return_tensors="pt")
     raw_image = Image.open(image_path).convert("RGB")
     inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
-    print(conversation)
+
+    decoded_input_tokens = [processor.decode([t]) for t in inputs["input_ids"][0]]
+    for i, tok in enumerate(decoded_input_tokens):
+        print(f"{i}: {repr(tok)}")
+
     output = model(**inputs,
                     use_cache=False,
                     output_attentions=True,
