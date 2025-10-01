@@ -204,7 +204,7 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
 
     return output
 
-def attention_rollout_function(attn_maps):
+def attention_rollout(attn_maps):
     """
     Performs rollout on the provided attention maps. Pass in the model attn weights e.g. model.enc_attn_weights[0:32]
     """
@@ -230,3 +230,33 @@ def attention_rollout_function(attn_maps):
         attn_rollout.append(prod)
 
     return attn_rollout
+
+def get_important_tokens(attn_map, raw_image, n=50):
+    """
+    Get the important image and text tokens from the attention map, either from attenion rollouts or the raw attention map itself
+    attn_map is a single attention layer from model.enc_attn_weights or from a single player from the attention rollout
+
+    Assumes that the input image is larger than 24x24 as LLaVa resizes images larger than 24x24 into 24x24. Not sure about images
+    smaller than 24x24
+    """
+    token_importances = attn_map[0, -2]  # importance of all tokens for position t
+    values, indices = torch.topk(token_importances, k=n)
+
+    impt_text_tokens_index = []
+    heatmap_raw = [0 for i in range(576)]
+    for score, idx in zip(values.tolist(), indices.tolist()):
+        if idx >= 5 and idx <= 580:
+            # Image tokens
+            heatmap_raw[idx-5] = 1
+        else:
+            impt_text_tokens_index.append(idx)
+
+    cls_attn = torch.tensor(heatmap_raw)
+    H, W = 24, 24  # 336 / 14
+    heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
+
+    # Assuming heatmap shape [H, W]
+    heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
+    heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='nearest')[0,0].numpy()
+
+    return heatmap_full, impt_text_tokens_index

@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout_function
+from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout, get_important_tokens
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -200,7 +200,7 @@ with tab2:
             with st.expander("Full output"):
                 st.write(decoded_tokens)
 
-            st.title("Attention Rollout")
+            st.title("Attention")
             file_path = os.path.join(generated_folder, "num.txt")
             with open(file_path, "r") as f:
                 num_forward_pass = int(f.read())
@@ -231,8 +231,8 @@ with tab2:
                                 assistant_prompt = processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False)
                             
                             model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
-                            st.success("Model instantiated")  
-                            st.write(f"assistant prompt is {assistant_prompt}")    
+                            st.success("Model instantiated")   
+                            st.markdown(f"```\nAssistant prompt: {assistant_prompt}\n```")
 
                             file_path = os.path.join(generated_folder, "original_prompt.txt")
                             with open(file_path, "r") as f:
@@ -241,22 +241,36 @@ with tab2:
                             output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, original_prompt, assistant_prompt=assistant_prompt)
                             st.success("Forward pass complete")
 
+                        with st.expander("Attention Rollout"):
                             # Decode the next token
                             # Use -2 instead of -1 as the model appends a white space token to the end of the assistant
                             # prompt. Using -1 results in the wrong predicted token.
                             topk = torch.topk(output.logits[:, -2], k=1, dim=-1)
                             for ids in topk.indices:
-                                st.write(f"next token is: {processor_m.tokenizer.decode(ids)}")
+                                st.markdown(f"```\nNext token is: {processor_m.tokenizer.decode(ids)}\n```")
 
                             # Run attention rollout on the enc_attn_weights
-                            
+                            rollout = attention_rollout(model.enc_attn_weights[0:32])
+                            raw_image = Image.open(tmp_file_path).convert("RGB")
+                            heat_map_rollout, impt_text_tokens_index = get_important_tokens(rollout[-1], raw_image)
+                            impt_text_tokens = [decoded_tokens[i] for i in impt_text_tokens_index]
 
-                            del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
-                            gc.collect()
+                            fig, ax = plt.subplots()
+                            ax.imshow(raw_image)
+                            ax.imshow(heat_map_rollout, cmap='jet', alpha=0.75) 
+                            ax.axis("off")
+
+                            # Display in Streamlit
+                            st.subheader("Important image tokens")
+                            st.pyplot(fig)
+                            st.subheader("Important text tokens")
+                            st.write(impt_text_tokens)
+
+                        del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+                        gc.collect()
 
                         # Set already_generated flag 
                         st.session_state[f"show_already_generated{exp}"] = True
-                        st.success("Rollout generated")
     
 with tab3:
     st.header("Interactive Maps")
