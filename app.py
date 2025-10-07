@@ -239,7 +239,6 @@ with tab2:
                                 original_prompt = f.read()
 
                             output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, original_prompt, assistant_prompt=assistant_prompt)
-                            st.success("Forward pass complete")
 
                         with st.expander("Attention Rollout"):
                             # Decode the next token
@@ -261,10 +260,21 @@ with tab2:
                             ax.axis("off")
 
                             # Display in Streamlit
-                            st.subheader("Important image tokens")
+                            st.title("Important image tokens")
                             st.pyplot(fig)
-                            st.subheader("Important text tokens")
+                            st.title("Important text tokens")
                             st.write(impt_text_tokens)
+
+                        with st.expander("Individual attention block"):
+                            display_dict = {}
+                            for i in range(len(output.hidden_states)):
+                                display_dict.update({f"Attention layer {i}":{}})
+                                logits_from_hidden_state = model.lm_head(output.hidden_states[i])
+                                probs = probs = torch.softmax(logits_from_hidden_state, dim=-1)  
+                                topk = torch.topk(probs[:, -2], k=10, dim=-1)
+                                for ids, value in zip(topk.indices[0], topk.values[0]):
+                                    display_dict[f"Attention layer {i}"].update({processor_m.tokenizer.decode(ids):value.item()})
+                            st.write(display_dict)
 
                         del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                         gc.collect()

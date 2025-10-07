@@ -175,14 +175,9 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
         conversation += [
             {"role": "assistant", "content": [{"type": "text", "text": assistant_prompt}]}
         ]
-    print(conversation)
     prompt = processor.apply_chat_template(conversation, add_generation_prompt=False, return_tensors="pt")
     raw_image = Image.open(image_path).convert("RGB")
     inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
-
-    decoded_input_tokens = [processor.decode([t]) for t in inputs["input_ids"][0]]
-    for i, tok in enumerate(decoded_input_tokens):
-        print(f"{i}: {repr(tok)}")
 
     output = model(**inputs,
                     use_cache=False,
