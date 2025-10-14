@@ -16,6 +16,7 @@ setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(ge
 # Use absolute path
 save_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved"
 vit_attn_folder = os.path.join(save_folder, "vit_attn")
+vit_attn_qkv_folder = os.path.join(vit_attn_folder, "vit_attn_qkv")
 generated_folder = os.path.join(save_folder, "generated")
 attn_folder = os.path.join(save_folder, "attn")
 
@@ -89,6 +90,22 @@ def instantiate_model():
     for layer in model.vision_tower.vision_model.encoder.layers:
         hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
         hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
+
+    # set hooks to get attention qkv vectors
+    model.qkv_vectors = {}
+    def make_hook(layer_name):
+        def hook(module, input, output):
+            # input is (hidden_states,) ; output is the projected tensor
+            model.qkv_vectors[layer_name] = output.detach().cpu()
+        return hook
+
+    hooks_vit_qkv = []
+    for i, layer in enumerate(model.vision_tower.vision_model.encoder.layers):
+        attn = layer.self_attn
+        for proj_name in ['q_proj', 'k_proj', 'v_proj']:
+            module = getattr(attn, proj_name)
+            hook = module.register_forward_hook(make_hook(f"layer_{i}_{proj_name}"))
+            hooks_vit_qkv.append(hook)
     #--------------------------------------------------
 
     processor = AutoProcessor.from_pretrained(model_id)
@@ -126,7 +143,7 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
 
     output = model.generate(
         **inputs, 
-        max_new_tokens=50, 
+        max_new_tokens=1, 
         do_sample=False,
         use_cache=True,
         output_attentions=True,
@@ -145,6 +162,12 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
     for i, attn in enumerate(model.enc_attn_weights_vit):
         file_path = os.path.join(vit_attn_folder, f"{i}.pt")
         torch.save(attn, file_path)
+
+    # Save the qkv vectors
+    for key in model.qkv_vectors.keys():
+        qkv_vector = model.qkv_vectors.get(key)
+        file_path = os.path.join(vit_attn_qkv_folder, f"{key}.pt")
+        torch.save(qkv_vector, file_path)
 
     # Save the output sequence
     file_path = os.path.join(generated_folder, "generated.pt")

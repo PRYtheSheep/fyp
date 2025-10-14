@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout, get_important_tokens
+from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout, get_important_tokens, vit_attn_qkv_folder
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -127,19 +127,19 @@ with tab1:
 
 with tab2:
     # Nested tabs
-    tab5, tab6 = st.tabs(["ViT Attention", "Attenion Rollout"])
+    tab5, tab6, tab7 = st.tabs(["ViT Attention", "ViT Q/K Vectors", "Attenion Rollout"])
 
     # ViT attention tab
     with tab5:
         # Band aid fix to prevent that stupid error
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-        st.write("ViT Attention")
 
         vit_layer = [i for i in range(24)]
         selected_vit_layer = st.selectbox(
             "ViT Attention Layer:",
             vit_layer,
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key="select_box_vit_attention_tab"
         )
         folder = Path(vit_attn_folder)
         vit_attn_files = sorted(
@@ -172,8 +172,34 @@ with tab2:
                 # Display in Streamlit
                 st.pyplot(fig)
 
-    #Attention rollout tab
+    # Q/K Vectors tab
     with tab6:
+        vit_layer = [i for i in range(24)]
+        selected_vit_layer_qkv = st.selectbox(
+            "ViT Attention Layer:",
+            vit_layer,
+            label_visibility="collapsed",
+            key="select_box_qkv_tab"
+        )
+        # Load the qkv files 
+        folder = Path(vit_attn_qkv_folder)
+        files = [f for f in folder.iterdir() if f.is_file()]
+
+        if len(files) == 0 or tmp_file_path is None:
+            st.write("Upload an image and/or run the generation at least once to save the qkv vectors")
+        else:
+            # Get the q,k,v vectors according to selected layer
+            q_vector, k_vector, v_vector = [], [], []
+            for f in files:
+                    if f"layer_{str(selected_vit_layer_qkv)}_k" in str(f):
+                        st.write(f)
+                        vector = torch.load(os.path.join(vit_attn_qkv_folder, f))
+                        st.write(vector)
+                        st.write(vector.shape)
+
+
+    # Attention rollout tab
+    with tab7:
         # Load the generated text
         folder = Path(vit_attn_folder)
         files = [f for f in folder.iterdir() if f.is_file()]
