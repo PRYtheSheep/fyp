@@ -9,6 +9,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 import time
+import plotly.graph_objects as go
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import gc
 
 # Set page configuration
@@ -189,13 +192,47 @@ with tab2:
             st.write("Upload an image and/or run the generation at least once to save the qkv vectors")
         else:
             # Get the q,k,v vectors according to selected layer
-            q_vector, k_vector, v_vector = [], [], []
+            q_vector, k_vector, v_vector = None, None, None
+            tsne = TSNE(n_components=2, perplexity=30, random_state=42)
             for f in files:
+                    if f"layer_{str(selected_vit_layer_qkv)}_q" in str(f):
+                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))
+                        v_pca = PCA(n_components=50, random_state=42).fit_transform(v[0].cpu().numpy())
+                        q_vector = tsne.fit_transform(v_pca)
+
                     if f"layer_{str(selected_vit_layer_qkv)}_k" in str(f):
-                        st.write(f)
-                        vector = torch.load(os.path.join(vit_attn_qkv_folder, f))
-                        st.write(vector)
-                        st.write(vector.shape)
+                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))
+                        v_pca = PCA(n_components=50, random_state=42).fit_transform(v[0].cpu().numpy())
+                        k_vector = tsne.fit_transform(v_pca)
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=q_vector[:,0],
+                y=q_vector[:,1],
+                mode='markers',
+                marker=dict(
+                    size=10,  # Adjust size as needed
+                    color="green",  
+                    line=dict(width=0.5, color='white')  # Optional border
+                ),
+                showlegend=False
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=k_vector[:,0],
+                y=k_vector[:,1],
+                mode='markers',
+                marker=dict(
+                    size=10,  # Adjust size as needed
+                    color="red",  
+                    line=dict(width=0.5, color='white')  # Optional border
+                ),
+                showlegend=False
+            ))
+            
+            st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="chart")
+
 
 
     # Attention rollout tab
