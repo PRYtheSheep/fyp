@@ -231,7 +231,33 @@ with tab2:
                 showlegend=False
             ))
             
-            st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="chart")
+            # Create 2 columns, one for plotly one for image
+            col_graph, col_image = st.columns([1, 1.5])
+            with col_graph:
+                clicked_point = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="chart")
+            with col_image:
+                raw_image = Image.open(tmp_file_path).convert("RGB")
+                fig, ax = plt.subplots()
+                if clicked_point and clicked_point.selection and clicked_point.selection.points:
+                    points = [p['point_index'] for p in clicked_point.selection.points]
+
+                    # Highlight the image token that corresponds to the clicked
+                    heatmap_raw = [0 for i in range(576)]
+                    for p in points:
+                        heatmap_raw[p] = 1
+                    cls_attn = torch.tensor(heatmap_raw)
+                    H, W = 24, 24  # 336 / 14
+                    heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
+                    # Assuming heatmap shape [H, W]
+                    heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
+                    heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='nearest')[0,0].numpy()
+                    ax.imshow(raw_image)
+                    ax.imshow(heatmap_full, cmap='jet', alpha=0.5)
+                    ax.axis('off')
+                else:
+                    ax.imshow(raw_image)
+                    ax.axis('off')
+                st.pyplot(fig)
 
 
 
