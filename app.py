@@ -130,7 +130,7 @@ with tab1:
 
 with tab2:
     # Nested tabs
-    tab5, tab6, tab7 = st.tabs(["ViT Attention", "ViT Q/K Vectors", "Attenion Rollout"])
+    tab5, tab6, tab7 = st.tabs(["ViT Attention", "ViT Q/K Vectors", "LM Attenion"])
 
     # ViT attention tab
     with tab5:
@@ -364,6 +364,9 @@ with tab2:
                                 for ids, value in zip(topk.indices[0], topk.values[0]):
                                     display_dict[f"Attention layer {i}"].update({processor_m.tokenizer.decode(ids):value.item()})
                             st.write(display_dict)
+
+                        with st.expander("Q/K Vectors"):
+                            st.write("Q/K vectors")
 
                         del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                         gc.collect()
