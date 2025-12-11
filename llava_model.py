@@ -9,6 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 import logging
 logger = logging.getLogger(__name__)
+from functools import wraps
 
 func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
@@ -106,6 +107,37 @@ def instantiate_model():
             module = getattr(attn, proj_name)
             hook = module.register_forward_hook(make_hook(f"layer_{i}_{proj_name}"))
             hooks_vit_qkv.append(hook)
+
+    # set hooks to get llm attention qkv vectors
+    model.llm_qkv_vectors = []
+    current_pass_qkv = {}
+    def make_llm_hook(layer_name):
+        def hook(module, input, output):
+            # input is (hidden_states,) ; output is the projected tensor
+            current_pass_qkv[layer_name] = output.detach().cpu()
+        return hook
+
+    # Wrapper
+    # Save old forward
+    orig_forward = model.language_model.forward
+    @wraps(orig_forward)
+    def forward_with_qkv(*args, **kwargs):
+        global current_pass_qkv
+        current_pass_qkv = {}  # reset per forward
+        output = orig_forward(*args, **kwargs)
+        # save the QKV of this forward pass
+        model.llm_qkv_vectors.append(current_pass_qkv)
+        return output
+
+    model.language_model.forward = forward_with_qkv
+
+    hooks_llm_qkv = []
+    for i, layer in enumerate(model.language_model.layers):
+        attn = layer.self_attn
+        for proj_name in ['q_proj', 'k_proj', 'v_proj']:
+            module = getattr(attn, proj_name)
+            hook = module.register_forward_hook(make_llm_hook(f"layer_{i}_{proj_name}"))
+            hooks_llm_qkv.append(hook)
     #--------------------------------------------------
 
     processor = AutoProcessor.from_pretrained(model_id)
@@ -143,7 +175,7 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
 
     output = model.generate(
         **inputs, 
-        max_new_tokens=1, 
+        max_new_tokens=20, 
         do_sample=False,
         use_cache=True,
         output_attentions=True,
