@@ -15,7 +15,7 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-save_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved"
+save_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved"
 vit_attn_folder = os.path.join(save_folder, "vit_attn")
 vit_attn_qkv_folder = os.path.join(vit_attn_folder, "vit_attn_qkv")
 generated_folder = os.path.join(save_folder, "generated")
@@ -92,7 +92,7 @@ def instantiate_model():
         hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
         hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
 
-    # set hooks to get attention qkv vectors
+    # set hooks to get vit attention qkv vectors
     model.qkv_vectors = {}
     def make_hook(layer_name):
         def hook(module, input, output):
@@ -214,7 +214,7 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
 
 def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, image_path, prompt, assistant_prompt=None):
     """
-    Run a forward passwith model()
+    Run a forward pass with model()
     """
     conversation = [
         {
