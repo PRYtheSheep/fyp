@@ -15,7 +15,7 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-save_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved"
+save_folder = r"C:\Users\Dreamcore\OneDrive\Desktop\fyp\saved"
 vit_attn_folder = os.path.join(save_folder, "vit_attn")
 vit_attn_qkv_folder = os.path.join(vit_attn_folder, "vit_attn_qkv")
 generated_folder = os.path.join(save_folder, "generated")
@@ -110,11 +110,11 @@ def instantiate_model():
 
     # set hooks to get llm attention qkv vectors
     model.llm_qkv_vectors = []
-    current_pass_qkv = {}
+    model.current_pass_qkv = {}
     def make_llm_hook(layer_name):
         def hook(module, input, output):
             # input is (hidden_states,) ; output is the projected tensor
-            current_pass_qkv[layer_name] = output.detach().cpu()
+            model.current_pass_qkv[layer_name] = output.detach().cpu()
         return hook
 
     # Wrapper
@@ -122,11 +122,10 @@ def instantiate_model():
     orig_forward = model.language_model.forward
     @wraps(orig_forward)
     def forward_with_qkv(*args, **kwargs):
-        global current_pass_qkv
-        current_pass_qkv = {}  # reset per forward
+        model.current_pass_qkv = {}  # reset per forward
         output = orig_forward(*args, **kwargs)
         # save the QKV of this forward pass
-        model.llm_qkv_vectors.append(current_pass_qkv)
+        model.llm_qkv_vectors.append(model.current_pass_qkv)
         return output
 
     model.language_model.forward = forward_with_qkv
@@ -230,6 +229,10 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
         conversation += [
             {"role": "assistant", "content": [{"type": "text", "text": assistant_prompt}]}
         ]
+    else:
+        conversation += [
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]}
+        ]
     prompt = processor.apply_chat_template(conversation, add_generation_prompt=False, return_tensors="pt")
     raw_image = Image.open(image_path).convert("RGB")
     inputs = processor(images=raw_image, text=prompt, return_tensors='pt').to(0, torch.float16)
@@ -242,10 +245,10 @@ def forward_pass_one_step(model, processor, hooks_pre_encoder, hooks_pre_encoder
                     output_scores=True,
                     eos_token_id=eos_token_id)
     
-    for h in hooks_pre_encoder:
-        h.remove()
-    for h in hooks_pre_encoder_vit:
-        h.remove()
+    # for h in hooks_pre_encoder:
+    #     h.remove()
+    # for h in hooks_pre_encoder_vit:
+    #     h.remove()
 
     # Save the model attn weights for testing
     for i, attn in enumerate(model.enc_attn_weights):

@@ -196,12 +196,12 @@ with tab2:
             tsne = TSNE(n_components=2, perplexity=30, random_state=42)
             for f in files:
                     if f"layer_{str(selected_vit_layer_qkv)}_q" in str(f):
-                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))
+                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))[:, 1:] 
                         v_pca = PCA(n_components=50, random_state=42).fit_transform(v[0].cpu().numpy())
-                        q_vector = tsne.fit_transform(v_pca)
+                        q_vector = tsne.fit_transform(v_pca) # Shape 576,2
 
                     if f"layer_{str(selected_vit_layer_qkv)}_k" in str(f):
-                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))
+                        v = torch.load(os.path.join(vit_attn_qkv_folder, f))[:, 1:] 
                         v_pca = PCA(n_components=50, random_state=42).fit_transform(v[0].cpu().numpy())
                         k_vector = tsne.fit_transform(v_pca)
 
@@ -234,7 +234,7 @@ with tab2:
             # Create 2 columns, one for plotly one for image
             col_graph, col_image = st.columns([1, 1.5])
             with col_graph:
-                clicked_point = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="chart")
+                clicked_point = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="vit_qk_chart")
             with col_image:
                 raw_image = Image.open(tmp_file_path).convert("RGB")
                 fig, ax = plt.subplots()
@@ -307,38 +307,46 @@ with tab2:
 
             # Create each expander
             for exp in expanders:
-                with st.expander(f"{decoded_tokens[exp]}"):
+                if f"expander_open_{exp}" not in st.session_state:
+                        st.session_state[f"expander_open_{exp}"] = False
+                with st.expander(f"{decoded_tokens[exp]}", expanded=st.session_state[f"expander_open_{exp}"]):
+
                     # Button inside each expander to trigger lazy load
                     if st.button(f"Load attention rollout", key=f"btn_{exp}"):
                         st.session_state[f"show_{exp}"] = True
+                        st.session_state[f"expander_open_{exp}"] = True
 
                     # Show content only if triggered and content has not been generated 
-                    if st.session_state[f"show_{exp}"] and not st.session_state[f"show_already_generated{exp}"]:
-                        with st.spinner(f"Running inference for token: {decoded_tokens[exp]}"):
-                            assistant_prompt = None
-                            if exp != -num_forward_pass:
-                                assistant_prompt = processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False)
-                            
-                            model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
-                            st.success("Model instantiated")   
-                            st.markdown(f"```\nAssistant prompt: {assistant_prompt}\n```")
+                    if st.session_state[f"show_{exp}"]:
+                        if not st.session_state[f"show_already_generated{exp}"]:
+                            with st.spinner(f"Running inference for token: {decoded_tokens[exp]}"):
+                                assistant_prompt = None
+                                if exp != -num_forward_pass:
+                                    assistant_prompt = processor.decode(output_sequences[0][-num_forward_pass:exp], skip_special_tokens=False)
+                                
+                                model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
+                                st.success("Model instantiated")   
+                                st.markdown(f"```\nAssistant prompt: {assistant_prompt}\n```")
 
-                            file_path = os.path.join(generated_folder, "original_prompt.txt")
-                            with open(file_path, "r") as f:
-                                original_prompt = f.read()
+                                file_path = os.path.join(generated_folder, "original_prompt.txt")
+                                with open(file_path, "r") as f:
+                                    original_prompt = f.read()
 
-                            output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, original_prompt, assistant_prompt=assistant_prompt)
+                                output = forward_pass_one_step(model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, original_prompt, assistant_prompt=assistant_prompt)
+                                st.session_state["model"] = model
+                                st.session_state["output"] = output
+                                st.session_state["processor_m"] = processor_m
 
                         with st.expander("Attention Rollout"):
                             # Decode the next token
                             # Use -2 instead of -1 as the model appends a white space token to the end of the assistant
                             # prompt. Using -1 results in the wrong predicted token.
-                            topk = torch.topk(output.logits[:, -2], k=1, dim=-1)
+                            topk = torch.topk(st.session_state["output"].logits[:, -2], k=1, dim=-1)
                             for ids in topk.indices:
-                                st.markdown(f"```\nNext token is: {processor_m.tokenizer.decode(ids)}\n```")
+                                st.markdown(f"```\nNext token is: {st.session_state['processor_m'].tokenizer.decode(ids)}\n```")
 
                             # Run attention rollout on the enc_attn_weights
-                            rollout = attention_rollout(model.enc_attn_weights[0:32])
+                            rollout = attention_rollout(st.session_state["model"].enc_attn_weights[0:32])
                             raw_image = Image.open(tmp_file_path).convert("RGB")
                             heat_map_rollout, impt_text_tokens_index = get_important_tokens(rollout[-1], raw_image)
                             impt_text_tokens = [decoded_tokens[i] for i in impt_text_tokens_index]
@@ -356,19 +364,77 @@ with tab2:
 
                         with st.expander("Individual attention block"):
                             display_dict = {}
-                            for i in range(len(output.hidden_states)):
+                            for i in range(len(st.session_state["output"].hidden_states)):
                                 display_dict.update({f"Attention layer {i}":{}})
-                                logits_from_hidden_state = model.lm_head(output.hidden_states[i])
+                                logits_from_hidden_state = st.session_state["model"].lm_head(st.session_state["output"].hidden_states[i])
                                 probs = probs = torch.softmax(logits_from_hidden_state, dim=-1)  
                                 topk = torch.topk(probs[:, -2], k=10, dim=-1)
                                 for ids, value in zip(topk.indices[0], topk.values[0]):
-                                    display_dict[f"Attention layer {i}"].update({processor_m.tokenizer.decode(ids):value.item()})
+                                    display_dict[f"Attention layer {i}"].update({st.session_state["processor_m"].tokenizer.decode(ids):value.item()})
                             st.write(display_dict)
 
                         with st.expander("Q/K Vectors"):
-                            st.write("Q/K vectors")
+                            #############
+                            st.write("Tokens up till this point:")
+                            st.write(decoded_tokens[:exp])
+                            #############
+                            llm_layer = [i for i in range(32)]
+                            selected_llm_layer_qkv = st.selectbox(
+                                "LLM Attention Layer:",
+                                llm_layer,
+                                label_visibility="collapsed",
+                                key="select_box_llm_qkv_tab"
+                            )
+                            llm_q_vectors = st.session_state["model"].llm_qkv_vectors[0][f"layer_{str(selected_llm_layer_qkv)}_q_proj"][0]
+                            llm_k_vectors = st.session_state["model"].llm_qkv_vectors[0][f"layer_{str(selected_llm_layer_qkv)}_k_proj"][0]
 
-                        del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+                            tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+                            q_pca = PCA(n_components=50, random_state=42).fit_transform(llm_q_vectors.cpu().numpy())
+                            q_vector = tsne.fit_transform(q_pca)
+                            k_pca = PCA(n_components=50, random_state=42).fit_transform(llm_k_vectors.cpu().numpy())
+                            k_vector = tsne.fit_transform(k_pca)
+
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=q_vector[:,0],
+                                y=q_vector[:,1],
+                                mode='markers+text',
+                                name='q', # curve number 0
+                                text=decoded_tokens[:exp],  # label per point
+                                textposition="top center",
+                                marker=dict(
+                                    size=10,  # Adjust size as needed
+                                    color="green",  
+                                    line=dict(width=0.5, color='white')  # Optional border
+                                ),
+                                showlegend=False
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=k_vector[:,0],
+                                y=k_vector[:,1],
+                                mode='markers+text',
+                                name='k', # curve number 1
+                                text=decoded_tokens[:exp],  # label per point
+                                textposition="top center",
+                                marker=dict(
+                                    size=10,  # Adjust size as needed
+                                    color="red",  
+                                    line=dict(width=0.5, color='white')  # Optional border
+                                ),
+                                showlegend=False
+                            ))
+                            # --------------------------------------
+                            def on_select():
+                                sel = st.session_state["llm_qk_chart"]["selection"]
+                                st.session_state.selected_tokens = [
+                                    p["point_index"] for p in sel["points"]
+                                ]
+                            # --------------------------------------
+                            st.plotly_chart(fig, use_container_width=True, on_select=on_select, key="llm_qk_chart")
+                            if "selected_tokens" in st.session_state:
+                                st.write(st.session_state.selected_tokens)
+
+                        # del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                         gc.collect()
 
                         # Set already_generated flag 
