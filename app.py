@@ -42,8 +42,8 @@ uploader_container = st.sidebar.empty()
 def render_uploader():
     with uploader_container.container():
         uploaded = st.file_uploader(
-            "Upload an Image, Audio, or Video",
-            type=["jpg", "jpeg", "png", "mp3", "wav", "mp4", "mov", "avi"],
+            "Image only",
+            type=["jpg", "jpeg", "png"],
             key=f"uploader_{st.session_state.uploader_key}",
         )
         
