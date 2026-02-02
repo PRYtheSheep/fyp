@@ -12,7 +12,23 @@ import time
 import plotly.graph_objects as go
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-import gc
+import gc 
+import streamlit as st
+from streamlit_flow import streamlit_flow
+from streamlit_flow.elements import StreamlitFlowNode, StreamlitFlowEdge
+from streamlit_flow.state import StreamlitFlowState
+from sae_lens import (
+    SAE,
+    ActivationsStore,
+    HookedSAETransformer,
+    LanguageModelSAERunnerConfig,
+    SAEConfig,
+    SAETrainingRunner,
+    upload_saes_to_huggingface,
+)
+
+from transformer_lens import ActivationCache, HookedTransformer, utils
+from transformer_lens.hook_points import HookPoint
 
 # Set page configuration
 st.set_page_config(
@@ -28,6 +44,8 @@ if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0  # counter for unique widget IDs
+if "test_output" not in st.session_state:
+    st.session_state.test_output = None  # test output
 
 # Memory tracker sidebar
 memory_tracker_container = st.sidebar.empty()
@@ -73,15 +91,34 @@ def render_uploader():
 
 uploaded_file,tmp_file_path = render_uploader()
 
+@st.cache_resource
+def instantiate_model_gemma():
+    """
+    Instantiates a Gemma model and returns the model and SAE. Only instantiate 1 model at a time due to GPU memory limits.
+    Use del to delete the model and SAE before instantiating a new model
+    """
+    gemmascope_sae_release = "gemma-scope-2b-pt-mlp-canonical"
+    gemmascope_all_sae_ids = [
+        f"layer_{i}/width_16k/canonical" for i in range(0,26)
+    ]
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+
+    gemma_2_2b = HookedSAETransformer.from_pretrained("gemma-2-2b", device=device)
+    gemma_2_2b_all_sae = [
+        SAE.from_pretrained(gemmascope_sae_release, i, device=str(device))[0] for i in gemmascope_all_sae_ids
+    ]
+    return gemma_2_2b, gemma_2_2b_all_sae
+
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Hidden Representations", "Misc."])
+tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Mechanistic Interpretability", "Misc."])
 
 with tab1:
     # Create dropdown from DataFrame column
     selected_model = st.selectbox(
         "Model:",
         [
-            "LLaVa-1.5-7b"
+            "LLaVa-1.5-7b",
+            "Gemma-2-2b"
         ],
         help="Choose a VLM"
     )
@@ -100,33 +137,36 @@ with tab1:
 
         # return results
         with st.spinner("Running inference..."):
-            # Instantiate the model 
-            model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
-            st.success("Model instantiated")
-            # Run a forward pass
-            output = forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, prompt)
-            st.success("Inference complete")
+            if selected_model == "LLaVa-1.5-7b":
+                # Instantiate the model 
+                model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id = instantiate_model()
+                st.success("Model instantiated")
+                # Run a forward pass
+                output = forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, tmp_file_path, prompt)
+                st.success("Inference complete")
+
+            elif selected_model == "Gemma-2-2b":
+                gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
         
-        # # Handle file upload if one exists in session state
-        # if st.session_state.uploaded_file:
+        if selected_model == "LLaVa-1.5-7b":
+            # Add assistant's response to conversation history and display it
+            st.session_state.messages.append({"role": "assistant", "type": "text", "content": processor.decode(output.sequences[0], skip_special_tokens=False)})
+            with st.chat_message("assistant"):
+                st.markdown(processor.decode(output.sequences[0], skip_special_tokens=False))
 
-        #     st.session_state.uploader_key += 1  # Increment the key to force a reset of the file uploader
-        #     st.session_state.uploaded_file = None  # Clear the uploaded file from session state
+            # Delete the model variables to free up VRAM
+            del model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
+            gc.collect()
 
-        # Save the output sequences and first forward pass LM attentions since its already generated anyways
-    
-
-        # Add assistant's response to conversation history and display it
-        st.session_state.messages.append({"role": "assistant", "type": "text", "content": processor.decode(output.sequences[0], skip_special_tokens=False)})
-        with st.chat_message("assistant"):
-            st.markdown(processor.decode(output.sequences[0], skip_special_tokens=False))
-
-        # Delete the model variables to free up VRAM
-        del model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
-        gc.collect()
-
-        # Rerun the app to re-render the sidebar after updating the session state
-        st.rerun()
+            # Rerun the app to re-render the sidebar after updating the session state
+            st.rerun()
+        
+        elif selected_model == "Gemma-2-2b":
+             # Add assistant's response to conversation history and display it
+            st.session_state.messages.append({"role": "assistant", "type": "text", "content": "Not supported yet"})
+            with st.chat_message("assistant"):
+                st.markdown("Not supported yet")
+            st.rerun()
 
 with tab2:
     # Nested tabs
@@ -441,7 +481,59 @@ with tab2:
                         st.session_state[f"show_already_generated{exp}"] = True
     
 with tab3:
-    st.header("Interactive Maps")
+    st.set_page_config(
+        layout="wide"
+    )
+
+    nodes = [StreamlitFlowNode(id='in', pos=(100, 100), data={'content': 'Input Tokens'}, node_type='input', source_position='right', draggable=False),]
+
+    for i in range(0,26):
+        nodes.extend([
+            StreamlitFlowNode(id=f'attn_{i}', pos=(250+200*i, 100), data={'content': f'ATN{i}'}, node_type='default', source_position='right', target_position='left', draggable=False),
+            StreamlitFlowNode(id=f'mlp_{i}', pos=(315+200*i, 100), data={'content': f'MLP{i}'}, node_type='default', source_position='right', target_position='left', draggable=False),
+            StreamlitFlowNode(id=f'rsd_{i}', pos=(395+200*i, 117), data={}, node_type='default', source_position='right', target_position='left', draggable=False, style={'width':10, 'height':10})
+            ])
+        
+    nodes.extend([
+        StreamlitFlowNode(id=f'unembed', pos=(250+200*26, 100), data={'content': f'Unembedding'}, node_type='default', source_position='right', target_position='left', draggable=False),
+        StreamlitFlowNode(id=f'out', pos=(5450+120, 100), data={'content': f'Output Token'}, node_type='default', source_position='right', target_position='left', draggable=False),
+    ])
+
+    edges = [
+        # StreamlitFlowEdge('in-connector_0', 'in', 'connector_0', animated=True),
+        # StreamlitFlowEdge('connector_0-attn_0', 'connector_0', 'attn_0', animated=True),
+        # StreamlitFlowEdge('attn_0-mlp_0', 'attn_0', 'mlp_0', animated=True),
+    ]
+
+    if 'click_interact_state' not in st.session_state:
+        st.session_state.click_interact_state = StreamlitFlowState(nodes, edges)
+
+    updated_state = streamlit_flow('ret_val_flow',
+                    st.session_state.click_interact_state,
+                    fit_view=True,
+                    get_node_on_click=True,
+                    get_edge_on_click=True)
+
+    # st.write(f"Clicked on: {updated_state.selected_id}")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        with st.expander("Activations"):
+            st.markdown(f"```\nThis graph plots the vector from the last row of the residual stream, taken after each layer.\n```")
+
+    with col2:
+        with st.form("steer_form"):
+            layer = st.selectbox("Layer", range(26))
+            feature = st.number_input("Feature ID", 0)
+            strength = st.slider("Strength", -200.0, 200.0, 0.0)
+            run = st.form_submit_button("Run")
+
+            if run:
+                gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
+                st.session_state.test_output = gemma_2_2b("yo")
+        if st.session_state.test_output is None:
+            st.write("test_output is None")
+        else:
+            st.write(st.session_state.test_output)
 
 with tab4:
     st.write("Misc")
