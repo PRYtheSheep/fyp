@@ -519,9 +519,16 @@ with tab3:
     with col1:
         with st.expander("Activations"):
             st.markdown(f"```\nThis graph plots the vector from the last row of the residual stream, taken after each layer.\n```")
+        with st.expander("Residuals"):
+            st.markdown("```\nRun a forward pass in generation tab or run a steered pass in the steering tab\n```")
+            st.markdown("```\nClick on a residual node to display the output tokens at that residual node layer\n```")
+        with st.expander("Features"):
+            st.markdown("```\nClick on a mlp node to display the features extracted by the SAE\n```")
+            st.write("The top features by activation strength is...")
 
     with col2:
         with st.form("steer_form"):
+            st.markdown("```\nSteer the output of Gemma using\nthis interface.\n```")
             layer = st.selectbox("Layer", range(26))
             feature = st.number_input("Feature ID", 0)
             strength = st.slider("Strength", -200.0, 200.0, 0.0)

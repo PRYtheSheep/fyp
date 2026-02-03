@@ -15,7 +15,7 @@ func_to_enable_grad = '_sample'
 setattr(LlavaForConditionalGeneration, func_to_enable_grad, torch.enable_grad(getattr(LlavaForConditionalGeneration, func_to_enable_grad)))
 
 # Use absolute path
-save_folder = r"C:\Users\Pey Ruo-Yang\Desktop\fyp\saved"
+save_folder = r"C:\Users\PRYth\OneDrive\Desktop\fyp\saved"
 vit_attn_folder = os.path.join(save_folder, "vit_attn")
 vit_attn_qkv_folder = os.path.join(vit_attn_folder, "vit_attn_qkv")
 generated_folder = os.path.join(save_folder, "generated")
