@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from llava_model import instantiate_model, forward_pass, get_processor, vit_attn_folder, generated_folder, forward_pass_one_step, attention_rollout, get_important_tokens, vit_attn_qkv_folder
 import torch
+from torch import Tensor
 import torch.nn.functional as F
 from PIL import Image
 import time
@@ -29,6 +30,7 @@ from sae_lens import (
 
 from transformer_lens import ActivationCache, HookedTransformer, utils
 from transformer_lens.hook_points import HookPoint
+from jaxtyping import Float
 
 # Set page configuration
 st.set_page_config(
@@ -44,8 +46,22 @@ if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0  # counter for unique widget IDs
-if "test_output" not in st.session_state:
-    st.session_state.test_output = None  # test output
+if "gemma_output_no_steering" not in st.session_state:
+    st.session_state.gemma_output_no_steering = None  
+if "gemma_output_steering" not in st.session_state:
+    st.session_state.gemma_output_steering = None  
+if "gemma_residual_no_steering" not in st.session_state:
+    st.session_state.gemma_residual_no_steering = None  
+if "gemma_residual_steering" not in st.session_state:
+    st.session_state.gemma_residual_steering = None  
+if "gemma_sae_acts_no_steering" not in st.session_state:
+    st.session_state.gemma_sae_acts_no_steering = None  
+if "gemma_sae_acts_steering" not in st.session_state:
+    st.session_state.gemma_sae_acts_steering = None  
+if "gemma_sae_recons_no_steering" not in st.session_state:
+    st.session_state.gemma_sae_recons_no_steering = None  
+if "gemma_sae_recons_steering" not in st.session_state:
+    st.session_state.gemma_sae_recons_steering = None  
 
 # Memory tracker sidebar
 memory_tracker_container = st.sidebar.empty()
@@ -109,6 +125,83 @@ def instantiate_model_gemma():
     ]
     return gemma_2_2b, gemma_2_2b_all_sae
 
+def run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, steering_args=None):
+    """
+    Calls a single forward pass with gemma model, hooks the model and runs with steering. Only steer 1 laten_idx at a time.
+    Model and SAE hooks are reset before new hooks are applied.
+    """
+    # Reset hooks
+    gemma_2_2b.reset_hooks()
+
+    # Attach hooks to extract residuals, SAE activations and SAE reconstructions
+    residual_after_steering = {}
+    def capture_residual_hook(layer):
+        def hook_fn(
+            activation: Float[Tensor, "batch pos d_model"],
+            hook: HookPoint,
+        ) -> None:
+            """Capture residual stream for specific layer."""
+            print(f"extracting resid from layer {layer}")
+            residual_after_steering[layer] = activation.detach().cpu().numpy()
+        return hook_fn
+
+    residual_hooks_after_steering = []
+    for layer in range(26):
+        residual_hooks_after_steering.append((f"blocks.{layer}.hook_resid_post", capture_residual_hook(layer)))
+
+    captured_sae_acts_post = {}
+    def extract_sae_acts_post(layer):
+        def hook_fn(activation, hook):
+            print(f"extracting sae acts_post from layer {layer}")
+            captured_sae_acts_post[layer] = activation.detach().cpu().numpy()
+            return activation
+        return hook_fn
+
+    captured_sae_recons = {}
+    def extract_sae_recons(layer):
+        def hook_fn(activation, hook):
+            print(f"extracting sae recons from layer {layer}")
+            captured_sae_recons[layer] = activation.detach().cpu().numpy()
+            return activation
+        return hook_fn
+
+    for layer, sae in enumerate(gemma_2_2b_all_sae):
+        sae.reset_hooks()
+    for layer, sae in enumerate(gemma_2_2b_all_sae):
+        sae.add_hook("hook_sae_acts_post", extract_sae_acts_post(layer))
+        sae.add_hook("hook_sae_recons", extract_sae_recons(layer))
+
+    if steering_args is not None:
+        # Add steering hooks and steer the model
+        latent_idx = steering_args["latent_idx"]
+        layer_idx = steering_args["layer_idx"]
+        steering_coefficient = steering_args["steering_coefficient"]
+
+        def sae_steering(latent_idx, layer_idx, steering_coefficient, sae):
+            def hook_fn(
+                activations: Float[Tensor, "batch pos d_in"],
+                hook: HookPoint,
+            ) -> Tensor:
+                """
+                Steers the model by returning a modified activations tensor, with some multiple of the steering vector added to all
+                sequence positions.
+                """
+                print(f"steering at layer {layer_idx}")
+                activations[:,:,latent_idx] = activations[:,:,latent_idx].clone() + steering_coefficient
+                return activations
+            return hook_fn
+        gemma_2_2b_all_sae[layer_idx].add_hook("hook_sae_acts_post", sae_steering(latent_idx,layer_idx,steering_coefficient, gemma_2_2b_all_sae[layer_idx]))
+
+    output = gemma_2_2b.run_with_hooks_with_saes(
+        prompt,
+        fwd_hooks=[*residual_hooks_after_steering],
+        saes=gemma_2_2b_all_sae,
+        reset_saes_end=True,
+        reset_hooks_end=True
+    )
+    gemma_2_2b.reset_hooks()
+    return output, residual_after_steering, captured_sae_acts_post, captured_sae_recons
+
 # Create tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Mechanistic Interpretability", "Misc."])
 
@@ -147,6 +240,11 @@ with tab1:
 
             elif selected_model == "Gemma-2-2b":
                 gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
+                output, residual, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, None)
+                st.session_state.gemma_output_no_steering = output
+                st.session_state.gemma_residual_no_steering = residual
+                st.session_state.gemma_sae_acts_no_steering = captured_sae_acts_post
+                st.session_state.gemma_sae_recons_no_steering = captured_sae_recons
         
         if selected_model == "LLaVa-1.5-7b":
             # Add assistant's response to conversation history and display it
@@ -162,10 +260,15 @@ with tab1:
             st.rerun()
         
         elif selected_model == "Gemma-2-2b":
-             # Add assistant's response to conversation history and display it
-            st.session_state.messages.append({"role": "assistant", "type": "text", "content": "Not supported yet"})
+            # Add assistant's response to conversation history and display it
+            probs = torch.softmax(output[0, -1, :], dim=-1)
+            top_probs, top_indices = torch.topk(probs, k=10)
+            text = "\n".join(
+                    gemma_2_2b.to_string(top_indices[i]).strip().ljust(15) + f"{top_probs[i].item():.2%}" for i in range(len(top_indices))
+                )
+            st.session_state.messages.append({"role": "assistant", "type": "text", "content": f"```{text}```"})
             with st.chat_message("assistant"):
-                st.markdown("Not supported yet")
+                st.markdown(f"```{text}```")
             st.rerun()
 
 with tab2:
@@ -536,11 +639,7 @@ with tab3:
 
             if run:
                 gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
-                st.session_state.test_output = gemma_2_2b("yo")
-        if st.session_state.test_output is None:
-            st.write("test_output is None")
-        else:
-            st.write(st.session_state.test_output)
+
 
 with tab4:
     st.write("Misc")
