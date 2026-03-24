@@ -9,10 +9,11 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 from PIL import Image
-import time
+import numpy as np
 import plotly.graph_objects as go
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+from sklearn.metrics.pairwise import cosine_similarity
 import gc 
 import streamlit as st
 from streamlit_flow import streamlit_flow
@@ -50,10 +51,14 @@ if "gemma_output_no_steering" not in st.session_state:
     st.session_state.gemma_output_no_steering = None  
 if "gemma_output_steering" not in st.session_state:
     st.session_state.gemma_output_steering = None  
-if "gemma_residual_no_steering" not in st.session_state:
-    st.session_state.gemma_residual_no_steering = None  
-if "gemma_residual_steering" not in st.session_state:
-    st.session_state.gemma_residual_steering = None  
+if "gemma_residual_mid_no_steering" not in st.session_state:
+    st.session_state.gemma_residual_mid_no_steering = None  
+if "gemma_residual_post_no_steering" not in st.session_state:
+    st.session_state.gemma_residual_post_no_steering = None  
+if "gemma_residual_mid_steering" not in st.session_state:
+    st.session_state.gemma_residual_mid_steering = None  
+if "gemma_residual_post_steering" not in st.session_state:
+    st.session_state.gemma_residual_post_steering = None   
 if "gemma_sae_acts_no_steering" not in st.session_state:
     st.session_state.gemma_sae_acts_no_steering = None  
 if "gemma_sae_acts_steering" not in st.session_state:
@@ -134,26 +139,41 @@ def run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, st
     gemma_2_2b.reset_hooks()
 
     # Attach hooks to extract residuals, SAE activations and SAE reconstructions
-    residual_after_steering = {}
-    def capture_residual_hook(layer):
+    residual_mid_after_steering = {}
+    def capture_residual_mid_hook(layer):
         def hook_fn(
             activation: Float[Tensor, "batch pos d_model"],
             hook: HookPoint,
         ) -> None:
             """Capture residual stream for specific layer."""
-            print(f"extracting resid from layer {layer}")
-            residual_after_steering[layer] = activation.detach().cpu().numpy()
+            print(f"extracting resid mid from layer {layer}")
+            residual_mid_after_steering[layer] = activation.detach()
         return hook_fn
 
-    residual_hooks_after_steering = []
+    residual_mid_hooks_after_steering = []
     for layer in range(26):
-        residual_hooks_after_steering.append((f"blocks.{layer}.hook_resid_post", capture_residual_hook(layer)))
+        residual_mid_hooks_after_steering.append((f"blocks.{layer}.hook_resid_mid", capture_residual_mid_hook(layer)))
+
+    residual_post_after_steering = {}
+    def capture_residual_post_hook(layer):
+        def hook_fn(
+            activation: Float[Tensor, "batch pos d_model"],
+            hook: HookPoint,
+        ) -> None:
+            """Capture residual stream for specific layer."""
+            print(f"extracting resid post from layer {layer}")
+            residual_post_after_steering[layer] = activation.detach()
+        return hook_fn
+
+    residual_post_hooks_after_steering = []
+    for layer in range(26):
+        residual_post_hooks_after_steering.append((f"blocks.{layer}.hook_resid_post", capture_residual_post_hook(layer)))
 
     captured_sae_acts_post = {}
     def extract_sae_acts_post(layer):
         def hook_fn(activation, hook):
             print(f"extracting sae acts_post from layer {layer}")
-            captured_sae_acts_post[layer] = activation.detach().cpu().numpy()
+            captured_sae_acts_post[layer] = activation.detach().cpu()
             return activation
         return hook_fn
 
@@ -161,7 +181,7 @@ def run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, st
     def extract_sae_recons(layer):
         def hook_fn(activation, hook):
             print(f"extracting sae recons from layer {layer}")
-            captured_sae_recons[layer] = activation.detach().cpu().numpy()
+            captured_sae_recons[layer] = activation.detach().cpu()
             return activation
         return hook_fn
 
@@ -187,20 +207,32 @@ def run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, st
                 sequence positions.
                 """
                 print(f"steering at layer {layer_idx}")
-                activations[:,:,latent_idx] = activations[:,:,latent_idx].clone() + steering_coefficient
+                activations[:,:,latent_idx] =  steering_coefficient
                 return activations
             return hook_fn
         gemma_2_2b_all_sae[layer_idx].add_hook("hook_sae_acts_post", sae_steering(latent_idx,layer_idx,steering_coefficient, gemma_2_2b_all_sae[layer_idx]))
 
     output = gemma_2_2b.run_with_hooks_with_saes(
         prompt,
-        fwd_hooks=[*residual_hooks_after_steering],
+        fwd_hooks=[*residual_mid_hooks_after_steering, *residual_post_hooks_after_steering],
         saes=gemma_2_2b_all_sae,
         reset_saes_end=True,
         reset_hooks_end=True
     )
     gemma_2_2b.reset_hooks()
-    return output, residual_after_steering, captured_sae_acts_post, captured_sae_recons
+    return output, residual_mid_after_steering, residual_post_after_steering, captured_sae_acts_post, captured_sae_recons
+
+def unembed_gemma(resid, gemma_2_2b, k):
+    activations_norm_ln_final=gemma_2_2b.ln_final(resid)
+    my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+    my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+    probs = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+    top_probs, top_indices = torch.topk(probs, k=k)
+    tokens = {}
+    for i in range(k):
+        token = gemma_2_2b.to_string(top_indices[i]).strip()
+        tokens[token] = top_probs[i].item()
+    return tokens
 
 # Create tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Generation", "Attention", "Mechanistic Interpretability", "Misc."])
@@ -240,9 +272,10 @@ with tab1:
 
             elif selected_model == "Gemma-2-2b":
                 gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
-                output, residual, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, None)
+                output, residual_mid, residual_post, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, None)
                 st.session_state.gemma_output_no_steering = output
-                st.session_state.gemma_residual_no_steering = residual
+                st.session_state.gemma_residual_mid_no_steering = residual_mid
+                st.session_state.gemma_residual_post_no_steering = residual_post
                 st.session_state.gemma_sae_acts_no_steering = captured_sae_acts_post
                 st.session_state.gemma_sae_recons_no_steering = captured_sae_recons
         
@@ -263,12 +296,19 @@ with tab1:
             # Add assistant's response to conversation history and display it
             probs = torch.softmax(output[0, -1, :], dim=-1)
             top_probs, top_indices = torch.topk(probs, k=10)
-            text = "\n".join(
-                    gemma_2_2b.to_string(top_indices[i]).strip().ljust(15) + f"{top_probs[i].item():.2%}" for i in range(len(top_indices))
-                )
-            st.session_state.messages.append({"role": "assistant", "type": "text", "content": f"```{text}```"})
+            lines = {}
+            for i in range(len(top_indices)):
+                # Decode the token
+                token_str = gemma_2_2b.tokenizer.decode(top_indices[i]).strip()
+                
+                # Make invisible characters visible for debugging
+                display_token = repr(token_str)
+                
+                # Use f-string padding to keep percentages aligned
+                lines[token_str] = top_probs[i].item()
+            st.session_state.messages.append({"role": "assistant", "type": "text", "content": f"```{lines}```"})
             with st.chat_message("assistant"):
-                st.markdown(f"```{text}```")
+                st.write(lines)
             st.rerun()
 
 with tab2:
@@ -594,7 +634,7 @@ with tab3:
         nodes.extend([
             StreamlitFlowNode(id=f'attn_{i}', pos=(250+200*i, 100), data={'content': f'ATN{i}'}, node_type='default', source_position='right', target_position='left', draggable=False),
             StreamlitFlowNode(id=f'mlp_{i}', pos=(315+200*i, 100), data={'content': f'MLP{i}'}, node_type='default', source_position='right', target_position='left', draggable=False),
-            StreamlitFlowNode(id=f'rsd_{i}', pos=(395+200*i, 117), data={}, node_type='default', source_position='right', target_position='left', draggable=False, style={'width':10, 'height':10})
+            StreamlitFlowNode(id=f'rsd_{i}', pos=(391+200*i, 108), data={}, node_type='default', source_position='right', target_position='left', draggable=False, style={'width':40, 'height':40})
             ])
         
     nodes.extend([
@@ -621,10 +661,222 @@ with tab3:
     col1, col2 = st.columns([2, 1])
     with col1:
         with st.expander("Activations"):
-            st.markdown(f"```\nThis graph plots the vector from the last row of the residual stream, taken after each layer.\n```")
-        with st.expander("Residuals"):
-            st.markdown("```\nRun a forward pass in generation tab or run a steered pass in the steering tab\n```")
-            st.markdown("```\nClick on a residual node to display the output tokens at that residual node layer\n```")
+            gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
+            st.markdown(f"```\nThis graph plots the tensor from the last row of the residual stream, taken after each layer.\n```")
+            if st.session_state.gemma_residual_mid_no_steering is None:
+                st.markdown("```Run a forward pass in the generations tab with the Gemma model first```")
+            else:
+                pca = PCA(n_components=2, random_state=42)
+                # Use the unsteered residual output as the base, each residual has shape 1, seq_len, 2304
+                refs = []
+                for layer in st.session_state.gemma_residual_mid_no_steering.keys():
+                    refs.append(st.session_state.gemma_residual_mid_no_steering[layer][0].cpu())
+                    refs.append(st.session_state.gemma_residual_post_no_steering[layer][0].cpu())
+
+                ref = np.concatenate(refs, axis=0)
+                pca.fit(ref)
+
+                # Plot each layer's last sequence activation
+                fig = go.Figure() # Initialise the graph
+
+                # Plot the base model traj
+                traj_mid = np.array([
+                    pca.transform(r[0].cpu())[-1]
+                    for r in st.session_state.gemma_residual_mid_no_steering.values()
+                ])
+
+                traj_post = np.array([
+                    pca.transform(r[0].cpu())[-1]
+                    for r in st.session_state.gemma_residual_post_no_steering.values()
+                ])
+                for layer_idx, (mid, post) in enumerate(zip(traj_mid, traj_post)):
+                    r_mid, r_post = st.session_state.gemma_residual_mid_no_steering[layer_idx], st.session_state.gemma_residual_post_no_steering[layer_idx]
+                    token_mid, token_post = unembed_gemma(r_mid, gemma_2_2b, 20), unembed_gemma(r_post, gemma_2_2b, 20)
+                    hovertext_mid, hovertext_post = f"Layer {layer_idx} resid_mid", f"Layer {layer_idx} resid_post"
+                    for token, prob in token_mid.items():
+                        hovertext_mid += f"<br>{token}: {prob:.2%}:"
+                    for token, prob in token_post.items():
+                        hovertext_post += f"<br>{token}: {prob:.2%}:"
+
+                    fig.add_trace(go.Scatter( # add the traces for the residual points here
+                        x=[mid[0], post[0]],
+                        y=[mid[1], post[1]],
+                        mode="lines+markers",
+                        line=dict(color="blue", width=2),
+                        marker=dict(color="blue", size=[6, 8]),
+                        hovertext=[
+                            f"{hovertext_mid}",
+                            f"{hovertext_post}",
+                            # Add in the output tokens for that layer here
+                        ],
+                        hoverinfo="text",
+                        name=f"Layer {layer_idx} residual",
+                        showlegend=True,
+                    ))
+                # Plot the steered model traj
+                if st.session_state.gemma_residual_mid_steering is not None and st.session_state.gemma_residual_post_steering is not None:
+                    traj_mid_steered = np.array([
+                        pca.transform(r[0].cpu())[-1]
+                        for r in st.session_state.gemma_residual_mid_steering.values()
+                    ])
+
+                    traj_post_steered = np.array([
+                        pca.transform(r[0].cpu())[-1]
+                        for r in st.session_state.gemma_residual_post_steering.values()
+                    ])
+                    for layer_idx, (mid, post) in enumerate(zip(traj_mid_steered, traj_post_steered)):
+                        r_mid, r_post = st.session_state.gemma_residual_mid_steering[layer_idx], st.session_state.gemma_residual_post_steering[layer_idx]
+                        token_mid, token_post = unembed_gemma(r_mid, gemma_2_2b, 20), unembed_gemma(r_post, gemma_2_2b, 20)
+                        hovertext_mid, hovertext_post = f"Layer {layer_idx} resid_mid", f"Layer {layer_idx} resid_post"
+                        for token, prob in token_mid.items():
+                            hovertext_mid += f"<br>{token}: {prob:.2%}:"
+                        for token, prob in token_post.items():
+                            hovertext_post += f"<br>{token}: {prob:.2%}:"
+
+                        fig.add_trace(go.Scatter( # add the traces for the residual points here
+                            x=[mid[0], post[0]],
+                            y=[mid[1], post[1]],
+                            mode="lines+markers",
+                            line=dict(color="green", width=2),
+                            marker=dict(color="green", size=[6, 8]),
+                            hovertext=[
+                                f"{hovertext_mid}",
+                                f"{hovertext_post}",
+                                # Add in the output tokens for that layer here
+                            ],
+                            hoverinfo="text",
+                            name=f"Layer {layer_idx} residual",
+                            showlegend=True,
+                        ))
+
+                # Plot each layer's top 5 features directions
+                _, gemma_2_2b_all_sae = instantiate_model_gemma()
+                # For each layer's feature activation
+                features = {} # Dict to hold all raw feature directions to calculate cosine similarity
+                for layer_idx, sae_act in st.session_state.gemma_sae_acts_no_steering.items():
+                    top_indices = np.argsort(np.abs(sae_act.numpy()[0, -1]))[-10:][::-1]
+                    top_indices_strength = sae_act.numpy()[0, -1][top_indices]
+
+                    x0, y0 = traj_mid[layer_idx, :]
+                    xs, ys, hovertexts = [], [], []
+                    features_layer = {}
+
+                    for latent_idx, strength in zip(top_indices, top_indices_strength):
+                        threshold = gemma_2_2b_all_sae[layer_idx].threshold[latent_idx]
+                        if strength < threshold:
+                            continue
+                        feature_direction = (
+                            (strength - threshold).detach()
+                            * gemma_2_2b_all_sae[layer_idx].W_dec[latent_idx]
+                                .detach()
+                        )
+                        features_layer[int(latent_idx)] = feature_direction
+                        feature_2d = feature_direction.cpu().numpy() @ pca.components_.T
+                        dx, dy = feature_2d
+                        x1 = x0 + dx * 0.7
+                        y1 = y0 + dy * 0.7
+                        # Add line segment
+                        xs.extend([x0, x1, None])
+                        ys.extend([y0, y1, None])
+                        # Get the resid mid and add the feature to it, then unembed it
+                        r_mid = st.session_state.gemma_residual_mid_no_steering[layer_idx]
+                        r_mid_plus_feature = r_mid + feature_direction
+                        token_mid_plus_feature = unembed_gemma(r_mid_plus_feature, gemma_2_2b, 20)
+                        hovertext = f"Layer {layer_idx}<br>Feature {latent_idx}<br>Strength {(strength - threshold).item():.3f}"
+                        for token, prob in token_mid_plus_feature.items():
+                            hovertext += f"<br>{token}: {prob:.2%}:"
+                        hovertexts.extend([
+                            "",  # start point
+                            hovertext, 
+                            None
+                        ])
+                    features[int(layer_idx)] = features_layer
+
+                    fig.add_trace(go.Scatter(
+                        x=xs,
+                        y=ys,
+                        mode="lines",
+                        line=dict(color="red", width=2),
+                        hovertext=hovertexts,
+                        hoverinfo="text",
+                        name=f"Layer {layer_idx} features",
+                        visible=True,
+                        showlegend=True,
+                    ))
+
+                st.plotly_chart(fig)
+
+                # Plot the cosine sim between the mid->post from layer to layer
+                # E.g. Cosine sim from mid->post of layer 0 and 1 etc.
+                # for layer_idx, _ in st.session_state.gemma_residual_post_no_steering.items():
+                #     if layer_idx == 0: # Layer 0 has no resid values behind it so continue
+                #         continue
+                #     r_mid, r_post = st.session_state.gemma_residual_mid_no_steering[layer_idx], st.session_state.gemma_residual_post_no_steering[layer_idx]
+                #     r_mid_prev, r_post_prev = st.session_state.gemma_residual_mid_no_steering[layer_idx-1], st.session_state.gemma_residual_post_no_steering[layer_idx-1]
+                    # r_direction = r_post - r_mid # Shape [1, seq_len, 2304]
+                    # r_direction_prev = r_post_prev - r_mid_prev
+                    # print(r_direction.shape)
+                    # similarity_score = cosine_similarity([r_direction[0,-1,:].cpu().numpy()], [r_direction_prev[0,-1,:].cpu().numpy()])
+                    # print(f"CoSim btw {layer_idx-1} and {layer_idx} is {similarity_score}")
+
+                # Plot the KL divergence between the prob distribution
+                fig2 = go.Figure()
+                kl_div = []
+                for layer_idx, _ in st.session_state.gemma_residual_post_no_steering.items():
+                    if layer_idx == 0: # Layer 0 has no resid values behind it so continue
+                        continue
+                    r_mid, r_post = st.session_state.gemma_residual_mid_no_steering[layer_idx], st.session_state.gemma_residual_post_no_steering[layer_idx]
+
+                    activations_norm_ln_final=gemma_2_2b.ln_final(r_mid)
+                    my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                    my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                    probs_mid = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+
+                    activations_norm_ln_final=gemma_2_2b.ln_final(r_post)
+                    my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                    my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                    probs_post = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+
+                    kl = F.kl_div(
+                        probs_post.log(),
+                        probs_mid,
+                        reduction='sum'
+                    )
+                    kl_div.append(kl.item())
+                fig2.add_trace(go.Scatter(
+                    x=[i+1 for i in range(len(kl_div))],
+                    y=kl_div,
+                    mode='lines+markers',  # 'lines', 'markers', or 'lines+markers'
+                    name='KL Divergence between mid and post for each layer',
+                    line=dict(color='firebrick', width=4)
+                ))
+                st.plotly_chart(fig2)
+                    
+                if answer := st.text_input("Provide a token to get the rank across all layers"):
+                    for (r_mid_item, r_post_item) in zip(st.session_state.gemma_residual_mid_no_steering.items(), st.session_state.gemma_residual_post_no_steering.items()):
+                        tokens_mid, tokens_post = unembed_gemma(r_mid_item[1], gemma_2_2b, 20), unembed_gemma(r_post_item[1], gemma_2_2b, 20)
+                        try:
+                            rank_mid = list(tokens_mid.keys()).index(answer)
+                        except:
+                            rank_mid = -1
+                        try:
+                            rank_post = list(tokens_post.keys()).index(answer)
+                        except:
+                            rank_post= -1
+                        st.write(f"{rank_mid} {rank_post}")
+
+                # Cosine sim between each feature
+                # for layer_idx, j in features.items():
+                #     l = []
+                #     latent_idx_list = []
+                #     for latent_idx, f in j.items():
+                #         l.append(f.cpu().numpy())
+                #         latent_idx_list.append(latent_idx)
+                #     similarity_matrix = cosine_similarity(l)
+                #     st.write(latent_idx_list)
+                #     st.write(similarity_matrix)
+                #     st.write("----------------")
+
         with st.expander("Features"):
             st.markdown("```\nClick on a mlp node to display the features extracted by the SAE\n```")
             st.write("The top features by activation strength is...")
@@ -632,14 +884,27 @@ with tab3:
     with col2:
         with st.form("steer_form"):
             st.markdown("```\nSteer the output of Gemma using\nthis interface.\n```")
+            prompt_steered = st.text_input(
+                "Prompt", 
+                value=st.session_state.messages[0]["content"] if len(st.session_state.messages) > 0 else ""
+                )
             layer = st.selectbox("Layer", range(26))
-            feature = st.number_input("Feature ID", 0)
-            strength = st.slider("Strength", -200.0, 200.0, 0.0)
+            feature = st.number_input("Feature", 0)
+            strength = st.slider("Steering strength",-200.0, 200.0, 0.0,)
             run = st.form_submit_button("Run")
 
             if run:
-                gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
-
+                steering_args={"layer_idx":layer, "latent_idx":feature, "steering_coefficient":strength}
+                gemma_2_2b, gemma_2_2b_all_sae = instantiate_model_gemma()
+                with st.spinner("Running inference on steered model..."):
+                    output, residual_mid, residual_post, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt_steered, steering_args={"layer_idx":layer, "latent_idx":feature, "steering_coefficient":strength})
+                    st.session_state.gemma_output_steering = output
+                    st.session_state.gemma_residual_mid_steering = residual_mid
+                    st.session_state.gemma_residual_post_steering = residual_post
+                    st.session_state.gemma_sae_acts_steering = captured_sae_acts_post
+                    st.session_state.gemma_sae_recons_steering = captured_sae_recons
+                    st.rerun()
+                
 
 with tab4:
     st.write("Misc")

@@ -174,7 +174,7 @@ def forward_pass(model, processor, hooks_pre_encoder, hooks_pre_encoder_vit, eos
 
     output = model.generate(
         **inputs, 
-        max_new_tokens=20, 
+        max_new_tokens=30, 
         do_sample=False,
         use_cache=True,
         output_attentions=True,
