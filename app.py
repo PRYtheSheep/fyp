@@ -32,6 +32,7 @@ from sae_lens import (
 from transformer_lens import ActivationCache, HookedTransformer, utils
 from transformer_lens.hook_points import HookPoint
 from jaxtyping import Float
+import pandas as pd
 
 # Set page configuration
 st.set_page_config(
@@ -77,6 +78,38 @@ with memory_tracker_container.container():
 
 # Sidebar container for uploader only
 uploader_container = st.sidebar.empty()
+
+def get_rank_data(token_input, gemma_model):
+    """Helper to process ranks and return a DataFrame"""
+    results = []
+    # Using your existing logic to zip layer items
+    zipped_layers = zip(
+        st.session_state.gemma_residual_mid_no_steering.items(), 
+        st.session_state.gemma_residual_post_no_steering.items()
+    )
+    
+    for i, (r_mid_item, r_post_item) in enumerate(zipped_layers):
+        tokens_mid = unembed_gemma(r_mid_item[1], gemma_model, 20)
+        tokens_post = unembed_gemma(r_post_item[1], gemma_model, 20)
+        
+        # Calculate ranks (helper to keep things dry)
+        r_mid = list(tokens_mid.keys()).index(token_input) if token_input in tokens_mid else -1
+        r_post = list(tokens_post.keys()).index(token_input) if token_input in tokens_post else -1
+        
+        results.append({"Layer": i, "Mid Rank": r_mid, "Post Rank": r_post})
+    
+    return pd.DataFrame(results)
+
+def color_ranks(val):
+    """
+    Returns CSS for background color based on rank.
+    Rank 0: Darkest | Rank 20: Lightest | -1: None
+    """
+    if val == -1:
+        return ""
+    # Calculate opacity: Rank 0 -> 0.9, Rank 20 -> 0.1
+    opacity = max(0.1, 1.0 - (val / 22)) 
+    return f"background-color: rgba(255, 75, 75, {opacity}); color: {'white' if opacity > 0.5 else 'black'}"
 
 def render_uploader():
     with uploader_container.container():
@@ -421,25 +454,48 @@ with tab2:
             with col_image:
                 raw_image = Image.open(tmp_file_path).convert("RGB")
                 fig, ax = plt.subplots()
+                
+                # Initialize three separate overlay masks
+                q_mask = np.zeros(576)
+                k_mask = np.zeros(576)
+                
                 if clicked_point and clicked_point.selection and clicked_point.selection.points:
-                    points = [p['point_index'] for p in clicked_point.selection.points]
+                    for p in clicked_point.selection.points:
+                        idx = p['point_index']
+                        # curve_number 0 = Green (Queries), curve_number 1 = Red (Keys)
+                        if p['curve_number'] == 0:
+                            q_mask[idx] = 1
+                        elif p['curve_number'] == 1:
+                            k_mask[idx] = 1
 
-                    # Highlight the image token that corresponds to the clicked
-                    heatmap_raw = [0 for i in range(576)]
-                    for p in points:
-                        heatmap_raw[p] = 1
-                    cls_attn = torch.tensor(heatmap_raw)
-                    H, W = 24, 24  # 336 / 14
-                    heatmap = cls_attn.reshape(H, W).detach().cpu().numpy()
-                    # Assuming heatmap shape [H, W]
-                    heatmap_tensor = torch.tensor(heatmap[None, None], dtype=torch.float32)
-                    heatmap_full = F.interpolate(heatmap_tensor, size=(raw_image.size[1], raw_image.size[0]), mode='nearest')[0,0].numpy()
+                    # Logic for colors:
+                    # 1. Intersection (Both selected) -> Blue (or any color you like)
+                    # 2. Only Q -> Green
+                    # 3. Only K -> Red
+                    
+                    # Create an RGB overlay (H, W, 3)
+                    overlay = np.zeros((24, 24, 3))
+                    
+                    for i in range(576):
+                        r, c = divmod(i, 24)
+                        if q_mask[i] and k_mask[i]:
+                            overlay[r, c] = [0, 0, 1] # Blue for both
+                        elif q_mask[i]:
+                            overlay[r, c] = [0, 1, 0] # Green for Q
+                        elif k_mask[i]:
+                            overlay[r, c] = [1, 0, 0] # Red for K
+
+                    # Resize the overlay to match image size using Nearest Neighbor to keep blocks sharp
+                    overlay_img = Image.fromarray((overlay * 255).astype(np.uint8)).resize(raw_image.size, resample=Image.NEAREST)
+                    
+                    # Show image and the custom RGB overlay
                     ax.imshow(raw_image)
-                    ax.imshow(heatmap_full, cmap='jet', alpha=0.5)
+                    ax.imshow(overlay_img, alpha=0.5)
                     ax.axis('off')
                 else:
                     ax.imshow(raw_image)
                     ax.axis('off')
+                
                 st.pyplot(fig)
 
 
@@ -657,7 +713,7 @@ with tab3:
                     get_node_on_click=True,
                     get_edge_on_click=True)
 
-    # st.write(f"Clicked on: {updated_state.selected_id}")
+    st.write(f"Clicked on: {updated_state.selected_id}")
     col1, col2 = st.columns([2, 1])
     with col1:
         with st.expander("Activations"):
@@ -852,18 +908,21 @@ with tab3:
                 ))
                 st.plotly_chart(fig2)
                     
-                if answer := st.text_input("Provide a token to get the rank across all layers"):
-                    for (r_mid_item, r_post_item) in zip(st.session_state.gemma_residual_mid_no_steering.items(), st.session_state.gemma_residual_post_no_steering.items()):
-                        tokens_mid, tokens_post = unembed_gemma(r_mid_item[1], gemma_2_2b, 20), unembed_gemma(r_post_item[1], gemma_2_2b, 20)
-                        try:
-                            rank_mid = list(tokens_mid.keys()).index(answer)
-                        except:
-                            rank_mid = -1
-                        try:
-                            rank_post = list(tokens_post.keys()).index(answer)
-                        except:
-                            rank_post= -1
-                        st.write(f"{rank_mid} {rank_post}")
+                cols = st.columns(3)
+                keys = ["input_col1", "input_col2", "input_col3"]
+
+                for i, col in enumerate(cols):
+                    with col:
+                        answer = st.text_input("Enter token:", key=keys[i])
+                        if answer:
+                            df = get_rank_data(answer, gemma_2_2b)
+                            
+                            # Apply styling to the rank columns
+                            styled_df = df.style.applymap(color_ranks, subset=["Mid Rank", "Post Rank"])
+                            
+                            # Display with use_container_width to fit the column
+                            table_height = (len(df) + 1) * 35 + 3
+                            st.dataframe(styled_df, use_container_width=True, hide_index=True, height=table_height)
 
                 # Cosine sim between each feature
                 # for layer_idx, j in features.items():
@@ -879,7 +938,32 @@ with tab3:
 
         with st.expander("Features"):
             st.markdown("```\nClick on a mlp node to display the features extracted by the SAE\n```")
-            st.write("The top features by activation strength is...")
+            if updated_state.selected_id is not None and updated_state.selected_id.startswith("mlp_"):
+                layer_idx = int(updated_state.selected_id.split("_")[1])
+                st.markdown(f"```\nSelected MLP Layer: {layer_idx}\n```")
+                sae_act = st.session_state.gemma_sae_acts_no_steering[layer_idx]
+                top_indices = np.argsort(np.abs(sae_act.numpy()[0, -1]))[-10:][::-1]
+                top_indices_strength = sae_act.numpy()[0, -1][top_indices]
+                st.write(f"```\nSparse feature vectors for MLP Layer {layer_idx}\n```")
+                fig, ax = plt.subplots()
+                ax.imshow(sae_act[0, -1, :].reshape(128, 128).detach().cpu().numpy())
+                ax.axis("off")
+                st.pyplot(fig)
+                for latent_idx, strength in zip(top_indices, top_indices_strength):
+                    with st.expander(f"Feature {latent_idx} with strength {strength:.3f}"):
+                        threshold = gemma_2_2b_all_sae[layer_idx].threshold[latent_idx]
+                        if strength < threshold:
+                            continue
+                        feature_direction = (
+                            (strength - threshold).detach()
+                            * gemma_2_2b_all_sae[layer_idx].W_dec[latent_idx]
+                                .detach()
+                        )
+                        fig, ax = plt.subplots()
+                        ax.imshow(feature_direction.reshape(48, 48).cpu().numpy())
+                        ax.axis("off")
+                        st.pyplot(fig)
+
 
     with col2:
         with st.form("steer_form"):
@@ -908,3 +992,4 @@ with tab3:
 
 with tab4:
     st.write("Misc")
+
