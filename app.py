@@ -33,6 +33,7 @@ from transformer_lens import ActivationCache, HookedTransformer, utils
 from transformer_lens.hook_points import HookPoint
 from jaxtyping import Float
 import pandas as pd
+import requests
 
 # Set page configuration
 st.set_page_config(
@@ -79,14 +80,26 @@ with memory_tracker_container.container():
 # Sidebar container for uploader only
 uploader_container = st.sidebar.empty()
 
-def get_rank_data(token_input, gemma_model):
+def get_neuronpedia_info(model_id, sae_id, feature_idx):
+    url = f"https://www.neuronpedia.org/api/feature/{model_id}/{sae_id}/{feature_idx}"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Explanations are usually in a list; the first one is often the primary auto-interp
+            explanations = data.get("explanations", [])
+            return explanations[0]['description'].strip()
+    except:
+        return 'Unable to retrieve feature'
+
+def project_weights_to_next_attn(model, sae_w_dec, layer_idx):
+    next_ln1 = model.blocks[layer_idx + 1].ln1
+    return next_ln1(sae_w_dec)
+
+def get_rank_data(token_input, gemma_model, zipped_layers):
     """Helper to process ranks and return a DataFrame"""
     results = []
     # Using your existing logic to zip layer items
-    zipped_layers = zip(
-        st.session_state.gemma_residual_mid_no_steering.items(), 
-        st.session_state.gemma_residual_post_no_steering.items()
-    )
     
     for i, (r_mid_item, r_post_item) in enumerate(zipped_layers):
         tokens_mid = unembed_gemma(r_mid_item[1], gemma_model, 20)
@@ -100,16 +113,31 @@ def get_rank_data(token_input, gemma_model):
     
     return pd.DataFrame(results)
 
-def color_ranks(val):
+def color_ranks(val, rgb=(255, 75, 75)):
     """
     Returns CSS for background color based on rank.
     Rank 0: Darkest | Rank 20: Lightest | -1: None
+    
+    Args:
+        val (int): The rank value.
+        rgb (tuple): A tuple of (R, G, B) integers.
     """
     if val == -1:
         return ""
+
     # Calculate opacity: Rank 0 -> 0.9, Rank 20 -> 0.1
-    opacity = max(0.1, 1.0 - (val / 22)) 
-    return f"background-color: rgba(255, 75, 75, {opacity}); color: {'white' if opacity > 0.5 else 'black'}"
+    # Note: val/22 ensures we don't hit 0 opacity at rank 20
+    opacity = max(0.1, 1.0 - (val / 22))
+    
+    r, g, b = rgb
+    
+    # Determine text color based on perceived brightness of the color
+    # formula: (R * 0.299 + G * 0.587 + B * 0.114)
+    # We also factor in the opacity for the background contrast
+    brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
+    text_color = "white" if (brightness * opacity) < 0.5 else "black"
+    
+    return f"background-color: rgba({r}, {g}, {b}, {opacity:.2f}); color: {text_color};"
 
 def render_uploader():
     with uploader_container.container():
@@ -157,7 +185,7 @@ def instantiate_model_gemma():
     ]
     device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
-    gemma_2_2b = HookedSAETransformer.from_pretrained("gemma-2-2b", device=device)
+    gemma_2_2b = HookedSAETransformer.from_pretrained("gemma-2-2b", device=device, local_files_only=True)
     gemma_2_2b_all_sae = [
         SAE.from_pretrained(gemmascope_sae_release, i, device=str(device))[0] for i in gemmascope_all_sae_ids
     ]
@@ -225,25 +253,36 @@ def run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt, st
         sae.add_hook("hook_sae_recons", extract_sae_recons(layer))
 
     if steering_args is not None:
-        # Add steering hooks and steer the model
-        latent_idx = steering_args["latent_idx"]
-        layer_idx = steering_args["layer_idx"]
-        steering_coefficient = steering_args["steering_coefficient"]
+        # 1. Group steering instructions by layer_idx
+        from collections import defaultdict
+        steers_by_layer = defaultdict(list)
+        for args in steering_args:
+            steers_by_layer[args["layer_idx"]].append(args)
 
-        def sae_steering(latent_idx, layer_idx, steering_coefficient, sae):
+        # 2. Define the unified steering hook factory
+        def sae_steering_factory(steer_configs):
             def hook_fn(
                 activations: Float[Tensor, "batch pos d_in"],
                 hook: HookPoint,
             ) -> Tensor:
-                """
-                Steers the model by returning a modified activations tensor, with some multiple of the steering vector added to all
-                sequence positions.
-                """
-                print(f"steering at layer {layer_idx}")
-                activations[:,:,latent_idx] =  steering_coefficient
+                # We iterate through all features intended for THIS specific layer
+                for config in steer_configs:
+                    l_idx = config["latent_idx"]
+                    coeff = config["steering_coefficient"]
+                    # Optional: print(f"Steering feature {l_idx} at {hook.name}")
+                    
+                    # Apply the steering (Clamping)
+                    activations[:, :, l_idx] = coeff
+                
                 return activations
             return hook_fn
-        gemma_2_2b_all_sae[layer_idx].add_hook("hook_sae_acts_post", sae_steering(latent_idx,layer_idx,steering_coefficient, gemma_2_2b_all_sae[layer_idx]))
+
+        # 3. Add one hook per layer that handles all its features
+        for layer_idx, configs in steers_by_layer.items():
+            gemma_2_2b_all_sae[layer_idx].add_hook(
+                "hook_sae_acts_post", 
+                sae_steering_factory(configs)
+            )
 
     output = gemma_2_2b.run_with_hooks_with_saes(
         prompt,
@@ -639,7 +678,7 @@ with tab2:
                                 y=q_vector[:,1],
                                 mode='markers+text',
                                 name='q', # curve number 0
-                                text=decoded_tokens[:exp],  # label per point
+                                text=[t if t != '<image>' else '' for t in decoded_tokens[:exp]],
                                 textposition="top center",
                                 marker=dict(
                                     size=10,  # Adjust size as needed
@@ -653,7 +692,7 @@ with tab2:
                                 y=k_vector[:,1],
                                 mode='markers+text',
                                 name='k', # curve number 1
-                                text=decoded_tokens[:exp],  # label per point
+                                text=[t if t != '<image>' else '' for t in decoded_tokens[:exp]],
                                 textposition="top center",
                                 marker=dict(
                                     size=10,  # Adjust size as needed
@@ -665,13 +704,58 @@ with tab2:
                             # --------------------------------------
                             def on_select():
                                 sel = st.session_state["llm_qk_chart"]["selection"]
-                                st.session_state.selected_tokens = [
-                                    p["point_index"] for p in sel["points"]
+                                # Store both the point index and the trace index
+                                st.session_state.selected_data = [
+                                    {"point_idx": p["point_index"], "trace_idx": p["curve_number"]} 
+                                    for p in sel["points"]
                                 ]
                             # --------------------------------------
-                            st.plotly_chart(fig, use_container_width=True, on_select=on_select, key="llm_qk_chart")
-                            if "selected_tokens" in st.session_state:
-                                st.write(st.session_state.selected_tokens)
+                            col_graph2, col_image2 = st.columns([1, 1.5])
+                            with col_graph2:
+                                clicked_point2 = st.plotly_chart(fig, use_container_width=True, on_select=on_select, key="llm_qk_chart")
+                                if "selected_tokens" in st.session_state:
+                                    st.write(st.session_state.selected_tokens)
+                            with col_image2:
+                                raw_image = Image.open(tmp_file_path).convert("RGB")
+                                
+                                # Initialize empty 1D masks for 576 patches
+                                q_mask = np.zeros(576)
+                                k_mask = np.zeros(576)
+
+                                if "selected_data" in st.session_state:
+                                    for p in st.session_state.selected_data:
+                                        idx = p["point_idx"]
+                                        trace = p["trace_idx"]
+                                        
+                                        # Map only if within image token range (5 to 580)
+                                        if 5 <= idx <= 580:
+                                            patch_idx = idx - 5
+                                            if trace == 0:     # Query Trace
+                                                q_mask[patch_idx] = 1
+                                            elif trace == 1:   # Key Trace
+                                                k_mask[patch_idx] = 1
+
+                                # Reshape to 24x24 grid
+                                q_mask_2d = q_mask.reshape(24, 24)
+                                k_mask_2d = k_mask.reshape(24, 24)
+
+                                # Prepare the Plot
+                                fig, ax = plt.subplots(figsize=(10, 10))
+                                ax.imshow(raw_image)
+
+                                # Define helper to resize and overlay
+                                def overlay_mask(mask, color_map, alpha_val):
+                                    if np.any(mask): # Only draw if there are selections
+                                        mask_resized = np.array(Image.fromarray(mask).resize(raw_image.size, resample=Image.NEAREST))
+                                        # Use the mask itself as the alpha channel so zeros are transparent
+                                        ax.imshow(mask_resized, cmap=color_map, alpha=mask_resized * alpha_val)
+
+                                # Apply Overlays
+                                overlay_mask(q_mask_2d, "Greens", 0.6) # Query = Green
+                                overlay_mask(k_mask_2d, "Reds", 0.6)   # Key = Red
+
+                                ax.axis('off')
+                                st.pyplot(fig)
 
                         # del model, processor_m, hooks_pre_encoder, hooks_pre_encoder_vit, eos_token_id, output
                         gc.collect()
@@ -718,7 +802,7 @@ with tab3:
     with col1:
         with st.expander("Activations"):
             gemma_2_2b, gemma_2_2b_all_sae =  instantiate_model_gemma()
-            st.markdown(f"```\nThis graph plots the tensor from the last row of the residual stream, taken after each layer.\n```")
+            st.markdown(f"```\nThis graph plots the tensor from the last row of the residual stream,\ntaken for each layer, before and after the MLP block.\n```")
             if st.session_state.gemma_residual_mid_no_steering is None:
                 st.markdown("```Run a forward pass in the generations tab with the Gemma model first```")
             else:
@@ -788,6 +872,42 @@ with tab3:
                             hovertext_mid += f"<br>{token}: {prob:.2%}:"
                         for token, prob in token_post.items():
                             hovertext_post += f"<br>{token}: {prob:.2%}:"
+
+                        r_mid_no_steering, r_post_no_steering = st.session_state.gemma_residual_mid_no_steering[layer_idx], st.session_state.gemma_residual_post_no_steering[layer_idx]
+                       
+                        activations_norm_ln_final=gemma_2_2b.ln_final(r_mid_no_steering)
+                        my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                        my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                        probs_mid_no_steering = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+
+                        activations_norm_ln_final=gemma_2_2b.ln_final(r_post_no_steering)
+                        my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                        my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                        probs_post_no_steering = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+
+                        activations_norm_ln_final=gemma_2_2b.ln_final(r_mid)
+                        my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                        my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                        probs_mid = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+                        
+                        activations_norm_ln_final=gemma_2_2b.ln_final(r_post)
+                        my_logits = gemma_2_2b.unembed(activations_norm_ln_final)
+                        my_logits_softcap = gemma_2_2b.cfg.output_logits_soft_cap * F.tanh(my_logits / gemma_2_2b.cfg.output_logits_soft_cap)
+                        probs_post = torch.softmax(my_logits_softcap[0, -1, :], dim=-1)
+
+                        kl_mid = F.kl_div(
+                            probs_mid.log(),
+                            probs_mid_no_steering,
+                            reduction='sum'
+                        )
+
+                        kl_post = F.kl_div(
+                            probs_post.log(),
+                            probs_post_no_steering,
+                            reduction='sum'
+                        )
+                        hovertext_mid += f"<br>KL divergence to base mid: {kl_mid.item():.4f}"
+                        hovertext_post += f"<br>KL divergence to base post: {kl_post.item():.4f}"
 
                         fig.add_trace(go.Scatter( # add the traces for the residual points here
                             x=[mid[0], post[0]],
@@ -915,14 +1035,21 @@ with tab3:
                     with col:
                         answer = st.text_input("Enter token:", key=keys[i])
                         if answer:
-                            df = get_rank_data(answer, gemma_2_2b)
-                            
-                            # Apply styling to the rank columns
-                            styled_df = df.style.applymap(color_ranks, subset=["Mid Rank", "Post Rank"])
-                            
-                            # Display with use_container_width to fit the column
+                            df = get_rank_data(answer, gemma_2_2b, zipped_layers = zip(
+                                    st.session_state.gemma_residual_mid_no_steering.items(), 
+                                    st.session_state.gemma_residual_post_no_steering.items()
+                                ))
+                            styled_df = df.style.applymap(lambda x: color_ranks(x, rgb=(255, 75, 75)), subset=["Mid Rank", "Post Rank"])
                             table_height = (len(df) + 1) * 35 + 3
                             st.dataframe(styled_df, use_container_width=True, hide_index=True, height=table_height)
+
+                            if st.session_state.gemma_residual_mid_steering is not None and st.session_state.gemma_residual_post_steering is not None:
+                                df_steered = get_rank_data(answer, gemma_2_2b, zipped_layers = zip(
+                                    st.session_state.gemma_residual_mid_steering.items(), 
+                                    st.session_state.gemma_residual_post_steering.items()
+                                ))
+                                styled_df_steered = df_steered.style.applymap(lambda x: color_ranks(x, rgb=(75, 75, 255)), subset=["Mid Rank", "Post Rank"])
+                                st.dataframe(styled_df_steered, use_container_width=True, hide_index=True, height=table_height)
 
                 # Cosine sim between each feature
                 # for layer_idx, j in features.items():
@@ -942,7 +1069,7 @@ with tab3:
                 layer_idx = int(updated_state.selected_id.split("_")[1])
                 st.markdown(f"```\nSelected MLP Layer: {layer_idx}\n```")
                 sae_act = st.session_state.gemma_sae_acts_no_steering[layer_idx]
-                top_indices = np.argsort(np.abs(sae_act.numpy()[0, -1]))[-10:][::-1]
+                top_indices = np.argsort(np.abs(sae_act.numpy()[0, -1]))[-20:][::-1]
                 top_indices_strength = sae_act.numpy()[0, -1][top_indices]
                 st.write(f"```\nSparse feature vectors for MLP Layer {layer_idx}\n```")
                 fig, ax = plt.subplots()
@@ -950,7 +1077,10 @@ with tab3:
                 ax.axis("off")
                 st.pyplot(fig)
                 for latent_idx, strength in zip(top_indices, top_indices_strength):
-                    with st.expander(f"Feature {latent_idx} with strength {strength:.3f}"):
+                    model = "gemma-2-2b" 
+                    sae = f"{layer_idx}-gemmascope-mlp-16k" 
+                    description = get_neuronpedia_info(model, sae, latent_idx)
+                    with st.expander(f"Feature {latent_idx} Strength {strength:.3f} {description}"):
                         threshold = gemma_2_2b_all_sae[layer_idx].threshold[latent_idx]
                         if strength < threshold:
                             continue
@@ -964,6 +1094,106 @@ with tab3:
                         ax.axis("off")
                         st.pyplot(fig)
 
+                W_hat = project_weights_to_next_attn(gemma_2_2b, gemma_2_2b_all_sae[layer_idx].W_dec, layer_idx)
+                W_V = gemma_2_2b.blocks[layer_idx+1].attn.W_V
+                W_O = gemma_2_2b.blocks[layer_idx + 1].attn.W_O
+                v_i = torch.einsum("fd,hdk->fhk", W_hat, W_V)
+                v_i_potential_per_head = torch.einsum("fhk,hkd->fhd", v_i, W_O)
+                v_i_potential_per_head_norm = torch.norm(v_i_potential_per_head, dim=-1)
+                v_i_potential_per_head_norm_total = v_i_potential_per_head_norm.sum(dim=-1)
+                x = [i for i in range(len(v_i_potential_per_head_norm_total))]
+                y = v_i_potential_per_head_norm_total.detach().cpu().numpy()
+                # fig, ax = plt.subplots()
+                # ax.scatter(x=x, y=y)
+                # for latent_idx in top_indices:
+                #     ax.scatter(x=x[latent_idx], y=y[latent_idx], color='red')
+                #     ax.annotate(f"{latent_idx}", (x[latent_idx], y[latent_idx]), textcoords="offset points", xytext=(0,10), ha='center', color='red')
+                # ax.set_xlabel("Feature")
+                # ax.set_ylabel("Write potential")
+                # ax.set_title(f"Write potential of each feature in layer {layer_idx} on the next attention layer")
+                # st.pyplot(fig)
+                y_sorted = np.sort(y)
+                sorted_indices = np.argsort(y)
+                n = len(y_sorted)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(y_sorted))),
+                    y=y_sorted,
+                    mode='markers',
+                    marker=dict(color='royalblue', opacity=0.3, size=5),
+                    name='Features',
+                    hoverinfo='skip' 
+                ))
+                highlight_x = []
+                highlight_y = []
+                highlight_text = []
+                n = len(y_sorted)
+                percentile = []
+                for latent_idx in top_indices:
+                    pos = np.where(sorted_indices == latent_idx)[0][0]
+                    val = y_sorted[pos]
+                    percentile_ = (pos / (n - 1)) * 100
+                    percentile.append({
+                        "id": latent_idx,
+                        "percentile": percentile_
+                    })
+                    highlight_x.append(pos)
+                    highlight_y.append(val)
+                    highlight_text.append(f"Idx: {latent_idx}<br>{percentile_:.1f}th percentile")
+                fig.add_trace(go.Scatter(
+                    x=highlight_x,
+                    y=highlight_y,
+                    mode='markers',
+                    marker=dict(color='red', size=8),
+                    hovertext=highlight_text,
+                    hoverinfo='text',
+                    name='Top Features'
+                ))
+                fig.update_layout(
+                    title=f"Write potential of each feature in layer {layer_idx} on the next attention layer, sorted",
+                    xaxis_title="Features (sorted)",
+                    yaxis_title="Write potential",
+                    xaxis=dict(showticklabels=False), 
+                    template="plotly_white",
+                    showlegend=False,
+                    margin=dict(l=40, r=40, t=60, b=40),
+                    hovermode="closest"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                THRESHOLD = 30
+                default_features = [f["id"] for f in percentile if f["percentile"] >= THRESHOLD]
+                colFeatureSelect, colButton = st.columns([3, 1])
+                with colFeatureSelect:
+                    selected_features = st.multiselect(
+                        "Select features to test",
+                        options=top_indices,
+                        default=default_features
+                    )
+                with colButton:
+                    st.write("##") # spacing
+                    run_with_selected_feature = st.button("Run")
+                
+                if run_with_selected_feature:
+                    features_to_be_zeroed = [f for f in top_indices if f not in selected_features]
+                    st.write(f"Zeroing out features: {features_to_be_zeroed}")
+                    steering_args = []
+                    for latent_idx in features_to_be_zeroed:
+                        steering_args.append({
+                            "layer_idx": layer_idx,
+                            "latent_idx": latent_idx,
+                            "steering_coefficient": 0
+                        })
+                    gemma_2_2b, gemma_2_2b_all_sae = instantiate_model_gemma()
+                    with st.spinner("Running inference on steered model..."):
+
+                        output, residual_mid, residual_post, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, st.session_state.messages[0]["content"] if len(st.session_state.messages) > 0 else "", steering_args=steering_args)
+                        st.session_state.gemma_output_steering = output
+                        st.session_state.gemma_residual_mid_steering = residual_mid
+                        st.session_state.gemma_residual_post_steering = residual_post
+                        st.session_state.gemma_sae_acts_steering = captured_sae_acts_post
+                        st.session_state.gemma_sae_recons_steering = captured_sae_recons
+                        st.rerun()
 
     with col2:
         with st.form("steer_form"):
@@ -981,7 +1211,7 @@ with tab3:
                 steering_args={"layer_idx":layer, "latent_idx":feature, "steering_coefficient":strength}
                 gemma_2_2b, gemma_2_2b_all_sae = instantiate_model_gemma()
                 with st.spinner("Running inference on steered model..."):
-                    output, residual_mid, residual_post, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt_steered, steering_args={"layer_idx":layer, "latent_idx":feature, "steering_coefficient":strength})
+                    output, residual_mid, residual_post, captured_sae_acts_post, captured_sae_recons = run_gemma_with_hook_with_steering(gemma_2_2b, gemma_2_2b_all_sae, prompt_steered, steering_args=[{"layer_idx":layer, "latent_idx":feature, "steering_coefficient":strength}])
                     st.session_state.gemma_output_steering = output
                     st.session_state.gemma_residual_mid_steering = residual_mid
                     st.session_state.gemma_residual_post_steering = residual_post
